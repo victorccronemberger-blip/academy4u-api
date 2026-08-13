@@ -50,11 +50,22 @@ export function getEnvironment(source = process.env) {
     nodeEnvironment: source.NODE_ENV?.trim().toLowerCase() || "development",
     host: source.HOST?.trim() || "0.0.0.0",
     port: parsePort(source.PORT),
-    publicOrigin: source.PUBLIC_ORIGIN?.trim() || "https://academy4u.com.br",
-    mysqlUrl: source.MYSQL_URL?.trim() || null,
+    // A primeira instalação na Hostinger usava os prefixos ACADEMY4U_ e
+    // GALATIC_. Mantemos esses nomes como aliases para que uma implantação
+    // nova possa reaproveitar o ambiente existente sem copiar ou revelar
+    // credenciais no repositório.
+    publicOrigin: source.PUBLIC_ORIGIN?.trim()
+      || source.ACADEMY4U_ORIGIN?.trim()
+      || source.ACADEMY4U_SUCCESS_ORIGIN?.trim()
+      || "https://academy4u.com.br",
+    mysqlUrl: source.MYSQL_URL?.trim()
+      || source.GALATIC_DATABASE_URL?.trim()
+      || null,
     // Segredo compartilhado com o frontend (LMS): criação de pedidos via
     // chamada servidor-a-servidor (cabeçalho x-academy-trusted-token).
-    trustedCheckoutToken: source.TRUSTED_CHECKOUT_TOKEN?.trim() || null,
+    trustedCheckoutToken: source.TRUSTED_CHECKOUT_TOKEN?.trim()
+      || source.ACADEMY4U_TRUSTED_CHECKOUT_TOKEN?.trim()
+      || null,
     asaasEnvironment,
     asaasRequested,
     asaasProductionApiKey,
