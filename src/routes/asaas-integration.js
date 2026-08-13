@@ -1,0 +1,110 @@
+import { createHash, timingSafeEqual } from "node:crypto";
+import { normalizeAsaasWebhookStatus } from "../domain/payment-status.js";
+import { normalizeProviderInstallment } from "../services/installment-service.js";
+
+function safeEqual(received, expected) {
+  const left = Buffer.from(String(received ?? ""), "utf8");
+  const right = Buffer.from(String(expected ?? ""), "utf8");
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function safeHashEqual(received, expectedHash) {
+  const digest = createHash("sha256").update(String(received ?? ""), "utf8").digest("hex");
+  return safeEqual(digest, expectedHash);
+}
+
+function paymentId(value) {
+  const id = String(value ?? "").trim();
+  return /^[A-Za-z0-9_-]{6,80}$/.test(id) ? id : null;
+}
+
+export function createAsaasWebhookHandler({ environment, store, onAccessGranted, onAccessRevoked }) {
+  return async function asaasWebhook(request, response) {
+    if (!environment.asaasWebhookToken && !environment.asaasWebhookTokenHash) {
+      response.status(503).json({ error: "webhook_not_configured" });
+      return;
+    }
+    const webhookAuthenticated = environment.asaasWebhookTokenHash
+      ? safeHashEqual(request.get("asaas-access-token"), environment.asaasWebhookTokenHash)
+      : safeEqual(request.get("asaas-access-token"), environment.asaasWebhookToken);
+    if (!webhookAuthenticated) {
+      response.status(401).json({ error: "invalid_webhook_token" });
+      return;
+    }
+
+    const event = String(request.body?.event ?? "").trim().toUpperCase();
+    const eventId = String(request.body?.id ?? "").trim();
+    const payment = request.body?.payment;
+    const orderId = paymentId(payment?.id);
+    const providerGroupId = paymentId(payment?.installment);
+    const externalReference = String(payment?.externalReference ?? "").trim();
+    if (
+      !/^PAYMENT_[A-Z_]+$/.test(event)
+      || !/^[A-Za-z0-9_&.-]{6,128}$/.test(eventId)
+      || !orderId
+      || !externalReference.startsWith("academy:")
+    ) {
+      response.status(400).json({ error: "invalid_webhook" });
+      return;
+    }
+
+    try {
+      let persisted;
+      let accessGrantedNow = false;
+      if (providerGroupId) {
+        const installment = normalizeProviderInstallment(payment);
+        if (!installment) {
+          response.status(400).json({ error: "invalid_installment_webhook" });
+          return;
+        }
+        installment.status = normalizeAsaasWebhookStatus(event, payment?.status);
+        persisted = await store.updatePaymentInstallmentFromWebhook({
+          provider: "asaas",
+          providerOrderId: orderId,
+          providerGroupId,
+          installment,
+          eventId,
+        });
+        accessGrantedNow = persisted?.accessGrantedNow === true;
+      } else {
+        persisted = await store.updateOrderFromWebhook({
+          provider: "asaas",
+          providerOrderId: orderId,
+          providerGroupId: null,
+          status: normalizeAsaasWebhookStatus(event, payment?.status),
+          eventId,
+        });
+        accessGrantedNow = persisted?.status === "paid" && persisted?.previousStatus !== "paid";
+      }
+      if (accessGrantedNow && persisted?.id && onAccessGranted) {
+        await onAccessGranted(persisted.id);
+      }
+      if (
+        persisted?.id
+        && ["refunded", "chargeback"].includes(persisted.status)
+        && !["refunded", "chargeback"].includes(persisted.previousStatus)
+        && onAccessRevoked
+      ) {
+        await onAccessRevoked(persisted.id, persisted.status);
+      }
+      response.status(200).json({ received: true, duplicate: Boolean(persisted?.duplicate) });
+    } catch (error) {
+      console.error("Could not persist Asaas webhook", {
+        event,
+        orderId,
+        type: error?.name,
+      });
+      try {
+        await store.recordOperationalAlert?.({
+          type: "webhook_failure",
+          source: "asaas-webhook",
+          summary: "Falha ao processar webhook autenticado do Asaas.",
+          context: { event, orderId, errorType: error?.name ?? "Error" },
+        });
+      } catch (alertError) {
+        console.error("Could not persist operational alert", { type: alertError?.name });
+      }
+      response.status(500).json({ error: "webhook_processing_failed" });
+    }
+  };
+}

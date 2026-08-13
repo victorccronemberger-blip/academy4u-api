@@ -1,0 +1,12 @@
+node_modules/
+.env
+data/
+*.log
+.DS_Store
+*.tar.gz
+*.zip
+# artefatos de teste de integração ao vivo (contêm dados de pedido/CPF)
+resultado-*.json
+bateria-*.json
+inbox_log.json
+.seen_uids.json

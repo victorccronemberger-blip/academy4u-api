@@ -1,0 +1,829 @@
+[
+  {
+    "slug": "10-anos-art-vitalicio",
+    "sourceTag": "10anos_anivertoro",
+    "title": "10 Anos ART (Vitalicio)",
+    "description": "Acesso vitalício à jornada comemorativa de formação para o mercado financeiro.",
+    "categoryId": "carreira",
+    "kind": "bundle",
+    "accent": "#800016",
+    "cohort": "4144",
+    "officialPriceCents": 1794600,
+    "priceCents": 897300,
+    "featured": true,
+    "keywords": [
+      "vitalício",
+      "formação",
+      "mercado financeiro"
+    ],
+    "active": false
+  },
+  {
+    "slug": "agropulse",
+    "sourceTag": "agropulse",
+    "title": "Agropulse",
+    "description": "Agronegócio, relacionamento e oportunidades financeiras no campo.",
+    "categoryId": "carreira",
+    "kind": "course",
+    "accent": "#004E89",
+    "cohort": "3997",
+    "officialPriceCents": 199700,
+    "priceCents": 99850,
+    "featured": false,
+    "keywords": [
+      "agro",
+      "agronegócio",
+      "relacionamento"
+    ],
+    "active": false
+  },
+  {
+    "slug": "ancord-2026",
+    "sourceTag": "ancord-2026",
+    "title": "ANCORD 2026",
+    "description": "Preparação para atuação como assessor de investimentos.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#FF002B",
+    "cohort": "4112",
+    "year": "2026",
+    "officialPriceCents": 99700,
+    "priceCents": 49850,
+    "featured": true,
+    "keywords": [
+      "ancord",
+      "assessor",
+      "certificação"
+    ]
+  },
+  {
+    "slug": "biblia-simulados-cfp-2026",
+    "sourceTag": "biblia-cfp_2026_1",
+    "title": "Biblia/Simulados CFP 2026",
+    "description": "Treino completo com simulados e questões para o exame CFP.",
+    "categoryId": "cfp",
+    "kind": "simulator",
+    "accent": "#A0001C",
+    "cohort": "4096",
+    "year": "2026",
+    "officialPriceCents": 199700,
+    "priceCents": 99850,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "simulados",
+      "questões"
+    ],
+    "active": false
+  },
+  {
+    "slug": "cfa-combo-l1-l2-l3",
+    "sourceTag": "cfa-combol1l2l3",
+    "title": "CFA Combo L1+L2+L3",
+    "description": "Uma jornada integrada pelos três níveis do CFA.",
+    "categoryId": "certificacoes",
+    "kind": "bundle",
+    "accent": "#407BA7",
+    "cohort": "4134",
+    "officialPriceCents": 1199700,
+    "priceCents": 599850,
+    "featured": true,
+    "keywords": [
+      "cfa",
+      "combo",
+      "level 1",
+      "level 2",
+      "level 3"
+    ],
+    "active": false
+  },
+  {
+    "slug": "cfa-level-ii",
+    "sourceTag": "CFALevelII-ART",
+    "title": "CFA Level II",
+    "description": "Valuation, análise e profundidade para a certificação internacional.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#FF002B",
+    "cohort": "4136",
+    "officialPriceCents": 1499700,
+    "priceCents": 749850,
+    "featured": true,
+    "keywords": [
+      "cfa",
+      "level ii",
+      "valuation",
+      "análise"
+    ],
+    "active": false
+  },
+  {
+    "slug": "cfg-2026",
+    "sourceTag": "cfg_2026",
+    "title": "CFG 2026",
+    "description": "Fundamentos para ingressar na gestão profissional de recursos.",
+    "categoryId": "gestao",
+    "kind": "course",
+    "accent": "#C00021",
+    "cohort": "4103",
+    "year": "2026",
+    "officialPriceCents": 600000,
+    "priceCents": 300000,
+    "featured": true,
+    "keywords": [
+      "cfg",
+      "fundos",
+      "gestão"
+    ]
+  },
+  {
+    "slug": "cfp-60-dias-exame-54",
+    "sourceTag": "cfp-2026_54",
+    "title": "CFP 60 dias Exame 54",
+    "description": "Rota intensiva direcionada para a edição 54 do exame CFP.",
+    "categoryId": "cfp",
+    "kind": "course",
+    "accent": "#A0001C",
+    "cohort": "4155",
+    "year": "2026",
+    "officialPriceCents": 999800,
+    "priceCents": 499900,
+    "featured": true,
+    "keywords": [
+      "cfp",
+      "exame 54",
+      "60 dias"
+    ]
+  },
+  {
+    "slug": "cfp-modular-completo",
+    "sourceTag": "cfp_modular_12345678",
+    "title": "CFP Modular completo",
+    "description": "A formação CFP organizada em uma rota modular completa.",
+    "categoryId": "cfp",
+    "kind": "course",
+    "accent": "#002962",
+    "cohort": "3776",
+    "officialPriceCents": 999700,
+    "priceCents": 499850,
+    "featured": true,
+    "keywords": [
+      "cfp",
+      "modular",
+      "planejamento"
+    ]
+  },
+  {
+    "slug": "cga-2026",
+    "sourceTag": "CGA_2026",
+    "title": "CGA 2026",
+    "description": "Gestão ativa, alocação e decisão institucional de portfólio.",
+    "categoryId": "gestao",
+    "kind": "course",
+    "accent": "#407BA7",
+    "cohort": "4111",
+    "year": "2026",
+    "officialPriceCents": 400000,
+    "priceCents": 200000,
+    "featured": true,
+    "keywords": [
+      "cga",
+      "gestor",
+      "portfólio"
+    ]
+  },
+  {
+    "slug": "cge-2026",
+    "sourceTag": "cge-2026",
+    "title": "CGE 2026",
+    "description": "Preparação para gestão de fundos estruturados e governança.",
+    "categoryId": "gestao",
+    "kind": "course",
+    "accent": "#FF002B",
+    "cohort": "4107",
+    "year": "2026",
+    "officialPriceCents": 200000,
+    "priceCents": 100000,
+    "featured": false,
+    "keywords": [
+      "cge",
+      "fundos estruturados",
+      "gestão"
+    ]
+  },
+  {
+    "slug": "cnpi-conteudo-brasileiro",
+    "sourceTag": "CNPI-CB_2026",
+    "title": "CNPI Conteúdo Brasileiro",
+    "description": "Preparação focada no conteúdo brasileiro da certificação CNPI.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#004E89",
+    "cohort": "4077",
+    "year": "2026",
+    "officialPriceCents": 250000,
+    "priceCents": 125000,
+    "featured": false,
+    "keywords": [
+      "cnpi",
+      "conteúdo brasileiro",
+      "apimec"
+    ],
+    "active": false
+  },
+  {
+    "slug": "cnpi-conteudo-global",
+    "sourceTag": "cnpi-cg_2026",
+    "title": "CNPI Conteúdo Global",
+    "description": "Preparação focada no conteúdo global da certificação CNPI.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#002962",
+    "cohort": "4078",
+    "year": "2026",
+    "officialPriceCents": 250000,
+    "priceCents": 125000,
+    "featured": false,
+    "keywords": [
+      "cnpi",
+      "conteúdo global",
+      "análise"
+    ],
+    "active": false
+  },
+  {
+    "slug": "cnpi-conteudo-tecnico",
+    "sourceTag": "cnpi-tc_2026",
+    "title": "CNPI Conteúdo Técnico",
+    "description": "Preparação focada no conteúdo técnico da certificação CNPI.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#00043A",
+    "cohort": "4076",
+    "year": "2026",
+    "officialPriceCents": 99700,
+    "priceCents": 49850,
+    "featured": false,
+    "keywords": [
+      "cnpi",
+      "conteúdo técnico",
+      "análise técnica"
+    ],
+    "active": false
+  },
+  {
+    "slug": "cnpi-pleno",
+    "sourceTag": "cnpi-cp_2026",
+    "title": "CNPI Pleno",
+    "description": "Formação integrada para conquistar a certificação CNPI Pleno.",
+    "categoryId": "certificacoes",
+    "kind": "bundle",
+    "accent": "#800016",
+    "cohort": "4059",
+    "year": "2026",
+    "officialPriceCents": 500000,
+    "priceCents": 250000,
+    "featured": true,
+    "active": false,
+    "keywords": [
+      "cnpi",
+      "pleno",
+      "apimec"
+    ]
+  },
+  {
+    "slug": "novo-cpa",
+    "sourceTag": "cpa2026",
+    "title": "CPA 2026",
+    "description": "Formação para a certificação de entrada da ANBIMA.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#800016",
+    "cohort": "4113",
+    "year": "2026",
+    "officialPriceCents": 150000,
+    "priceCents": 75000,
+    "featured": true,
+    "keywords": [
+      "cpa",
+      "anbima",
+      "banco",
+      "primeira certificação"
+    ]
+  },
+  {
+    "slug": "cpro-i",
+    "sourceTag": "cproi2026",
+    "title": "CPRO-I 2026",
+    "description": "Aprofundamento técnico em investimentos e produtos financeiros.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#A0001C",
+    "cohort": "4114",
+    "year": "2026",
+    "officialPriceCents": 299800,
+    "priceCents": 149900,
+    "featured": true,
+    "keywords": [
+      "cpro-i",
+      "investimentos",
+      "anbima"
+    ]
+  },
+  {
+    "slug": "cpro-r",
+    "sourceTag": "cpror2026",
+    "title": "CPRO-R 2026",
+    "description": "Relacionamento, recomendação e atendimento qualificado.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#C00021",
+    "cohort": "4133",
+    "year": "2026",
+    "officialPriceCents": 299800,
+    "priceCents": 149900,
+    "featured": true,
+    "keywords": [
+      "cpro-r",
+      "relacionamento",
+      "anbima",
+      "cliente"
+    ]
+  },
+  {
+    "slug": "excel-basico-mercado-financeiro",
+    "sourceTag": "excelbasicomf",
+    "title": "Excel Básico",
+    "description": "Planilhas e organização de dados para começar com segurança.",
+    "categoryId": "ferramentas",
+    "kind": "course",
+    "accent": "#002962",
+    "cohort": "4126",
+    "officialPriceCents": 49700,
+    "priceCents": 24850,
+    "featured": false,
+    "keywords": [
+      "excel",
+      "planilhas",
+      "mercado financeiro"
+    ],
+    "active": false
+  },
+  {
+    "slug": "gerente-relacionamento",
+    "sourceTag": "grelacionamento",
+    "title": "Gerente de Relacionamento",
+    "description": "Prática comercial e relacionamento para a rotina bancária.",
+    "categoryId": "carreira",
+    "kind": "course",
+    "accent": "#407BA7",
+    "cohort": "3998",
+    "officialPriceCents": 29700,
+    "priceCents": 14850,
+    "featured": false,
+    "keywords": [
+      "gerente",
+      "relacionamento",
+      "banco"
+    ],
+    "active": false
+  },
+  {
+    "slug": "ia-excel-mercado-financeiro",
+    "sourceTag": "iamf_excel",
+    "title": "IA + Excel Mercado Financeiro",
+    "description": "Inteligência artificial e Excel aplicados à produtividade financeira.",
+    "categoryId": "ferramentas",
+    "kind": "bundle",
+    "accent": "#004E89",
+    "cohort": "4120",
+    "officialPriceCents": 49700,
+    "priceCents": 24850,
+    "featured": false,
+    "keywords": [
+      "ia",
+      "excel",
+      "produtividade",
+      "mercado financeiro"
+    ],
+    "active": false
+  },
+  {
+    "slug": "ia-mercado-financeiro",
+    "sourceTag": "iamf",
+    "title": "IA Mercado Financeiro",
+    "description": "Inteligência artificial aplicada a pesquisa, análise e produtividade.",
+    "categoryId": "ferramentas",
+    "kind": "course",
+    "accent": "#800016",
+    "cohort": "4125",
+    "officialPriceCents": 49700,
+    "priceCents": 24850,
+    "featured": false,
+    "keywords": [
+      "ia",
+      "inteligência artificial",
+      "mercado financeiro"
+    ],
+    "active": false
+  },
+  {
+    "slug": "investimentos",
+    "sourceTag": "artpinvestimentos",
+    "title": "Investimentos",
+    "description": "Fundamentos para compreender produtos, risco, retorno e alocação.",
+    "categoryId": "ferramentas",
+    "kind": "course",
+    "accent": "#A0001C",
+    "cohort": "4084",
+    "officialPriceCents": 9700,
+    "priceCents": 4850,
+    "featured": false,
+    "keywords": [
+      "investimentos",
+      "risco",
+      "retorno",
+      "alocação"
+    ],
+    "active": false
+  },
+  {
+    "slug": "lidero-2026",
+    "sourceTag": "lidero_2026",
+    "title": "LIDERO 2026",
+    "description": "Formação para liderança, execução e desenvolvimento de equipes.",
+    "categoryId": "carreira",
+    "kind": "course",
+    "accent": "#C00021",
+    "cohort": "3995",
+    "year": "2026",
+    "officialPriceCents": 399700,
+    "priceCents": 199850,
+    "featured": true,
+    "keywords": [
+      "liderança",
+      "gestão",
+      "equipes"
+    ],
+    "active": false
+  },
+  {
+    "slug": "masterclass-alta-performance",
+    "sourceTag": "masteraltaperformance",
+    "title": "Masterclass Alta Performance",
+    "description": "Estratégias práticas para elevar foco, execução e resultado profissional.",
+    "categoryId": "carreira",
+    "kind": "course",
+    "accent": "#FF002B",
+    "cohort": "2542",
+    "officialPriceCents": 199700,
+    "priceCents": 99850,
+    "featured": false,
+    "active": false,
+    "keywords": [
+      "alta performance",
+      "produtividade",
+      "carreira"
+    ]
+  },
+  {
+    "slug": "masterclass-lideranca",
+    "sourceTag": "masterclassARTperf",
+    "title": "Masterclass Liderança",
+    "description": "Fundamentos de liderança para decisões, conversas e equipes.",
+    "categoryId": "carreira",
+    "kind": "course",
+    "accent": "#407BA7",
+    "cohort": "4085",
+    "officialPriceCents": 199700,
+    "priceCents": 99850,
+    "featured": false,
+    "keywords": [
+      "liderança",
+      "equipes",
+      "carreira"
+    ],
+    "active": false
+  },
+  {
+    "slug": "matematica-financeira-2024-2026",
+    "sourceTag": "matematica-financeira_2026",
+    "title": "Matemática Financeira",
+    "description": "Valor do dinheiro no tempo, juros e decisões financeiras.",
+    "categoryId": "ferramentas",
+    "kind": "course",
+    "accent": "#407BA7",
+    "cohort": "4124",
+    "year": "2026",
+    "officialPriceCents": 49700,
+    "priceCents": 24850,
+    "featured": false,
+    "keywords": [
+      "matemática financeira",
+      "juros",
+      "finanças"
+    ],
+    "active": false
+  },
+  {
+    "slug": "plano-financeiro-cfp",
+    "sourceTag": "planofinanceiro_2026",
+    "title": "Plano Financeiro CFP",
+    "description": "Construção prática do plano financeiro exigido na jornada CFP.",
+    "categoryId": "cfp",
+    "kind": "course",
+    "accent": "#002962",
+    "cohort": "4079",
+    "year": "2026",
+    "officialPriceCents": 299700,
+    "priceCents": 149850,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "plano financeiro",
+      "planejamento"
+    ],
+    "active": false
+  },
+  {
+    "slug": "cfa-level-i",
+    "sourceTag": "cfa_2025",
+    "title": "Preparatório CFA Level I",
+    "description": "Preparação estruturada para o primeiro nível da certificação CFA.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#004E89",
+    "cohort": "4151",
+    "officialPriceCents": 1500000,
+    "priceCents": 750000,
+    "featured": true,
+    "active": false,
+    "keywords": [
+      "cfa",
+      "level i",
+      "certificação internacional"
+    ]
+  },
+  {
+    "slug": "cfp-60-dias-2026",
+    "sourceTag": "cfp-2026_53",
+    "title": "Preparatório CFP 60 dias",
+    "description": "Preparação intensiva com calendário objetivo para o exame CFP.",
+    "categoryId": "cfp",
+    "kind": "course",
+    "accent": "#800016",
+    "cohort": "4070",
+    "year": "2026",
+    "officialPriceCents": 999800,
+    "priceCents": 499900,
+    "featured": true,
+    "active": false,
+    "keywords": [
+      "cfp",
+      "60 dias",
+      "intensivo"
+    ]
+  },
+  {
+    "slug": "renovacao-cfp",
+    "sourceTag": "renovacao-cfp",
+    "title": "Renovacao CFP",
+    "description": "Atualização e preparação para o processo de renovação CFP.",
+    "categoryId": "cfp",
+    "kind": "course",
+    "accent": "#A0001C",
+    "cohort": "4139",
+    "officialPriceCents": 999700,
+    "priceCents": 499850,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "renovação",
+      "certificação"
+    ],
+    "active": false
+  },
+  {
+    "slug": "risco-e-credito",
+    "sourceTag": "riscocredito2",
+    "title": "Risco e Crédito",
+    "description": "Análise de risco, garantias e decisões de concessão.",
+    "categoryId": "ferramentas",
+    "kind": "course",
+    "accent": "#A0001C",
+    "cohort": "3996",
+    "officialPriceCents": 129700,
+    "priceCents": 64850,
+    "featured": false,
+    "keywords": [
+      "crédito",
+      "risco",
+      "concessão"
+    ],
+    "active": false
+  },
+  {
+    "slug": "ancord-2026-nattos",
+    "active": false,
+    "sourceTag": "ancord-2026_3",
+    "title": "ANCORD 2026 - NATTOS",
+    "description": "Turma bônus NATTOS para preparação ANCORD.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#FF002B",
+    "cohort": "3915",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "ancord",
+      "nattos",
+      "bônus"
+    ]
+  },
+  {
+    "slug": "cfp-acesso-antecipado-54",
+    "active": false,
+    "sourceTag": "cfp-2026_antecipado",
+    "title": "CFP Acesso Antecipado Exame 54",
+    "description": "Acesso antecipado ao material do exame 54 do CFP.",
+    "categoryId": "cfp",
+    "kind": "course",
+    "accent": "#A0001C",
+    "cohort": "4129",
+    "officialPriceCents": 999800,
+    "priceCents": 499900,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "antecipado",
+      "exame 54"
+    ]
+  },
+  {
+    "slug": "cfp47-revisao-54",
+    "active": false,
+    "sourceTag": "cfp47-revisão_54",
+    "title": "CFP Revisão Exame 54",
+    "description": "Revisão direcionada para o exame 54 do CFP.",
+    "categoryId": "cfp",
+    "kind": "course",
+    "accent": "#002962",
+    "cohort": "4118",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "revisão",
+      "exame 54"
+    ]
+  },
+  {
+    "slug": "concurso-portugues",
+    "active": false,
+    "sourceTag": "concurso-portugues",
+    "title": "Português para Concursos",
+    "description": "Preparação em língua portuguesa para concursos.",
+    "categoryId": "concursos",
+    "kind": "course",
+    "accent": "#004E89",
+    "cohort": "3327",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "português",
+      "concurso"
+    ]
+  },
+  {
+    "slug": "enem-2024",
+    "active": false,
+    "sourceTag": "enem2024",
+    "title": "ENEM 2024",
+    "description": "Preparação para o ENEM.",
+    "categoryId": "concursos",
+    "kind": "course",
+    "accent": "#407BA7",
+    "cohort": "4073",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "enem",
+      "vestibular"
+    ]
+  },
+  {
+    "slug": "kit-cfp",
+    "sourceTag": "kit_cfp",
+    "title": "Kit CFP",
+    "description": "Kit completo de materiais para o CFP.",
+    "categoryId": "cfp",
+    "kind": "bundle",
+    "accent": "#800016",
+    "cohort": "3384",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "kit",
+      "material"
+    ],
+    "active": false
+  },
+  {
+    "slug": "kit-cfp-54",
+    "sourceTag": "kit_cfp_54",
+    "title": "Kit CFP Exame 54",
+    "description": "Kit de materiais direcionado ao exame 54.",
+    "categoryId": "cfp",
+    "kind": "bundle",
+    "accent": "#A0001C",
+    "cohort": "4119",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "cfp",
+      "kit",
+      "exame 54"
+    ],
+    "active": false
+  },
+  {
+    "slug": "mastermind-art",
+    "active": false,
+    "sourceTag": "mastermind-ART",
+    "title": "Mastermind ART",
+    "description": "Grupo de mastermind da Academia Rafael Toro.",
+    "categoryId": "carreira",
+    "kind": "course",
+    "accent": "#C00021",
+    "cohort": "4128",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "mastermind",
+      "networking"
+    ]
+  },
+  {
+    "slug": "onboarding-parceiros",
+    "active": false,
+    "sourceTag": "onboarding",
+    "title": "Onboarding Novos Parceiros",
+    "description": "Integração e boas-vindas para novos parceiros.",
+    "categoryId": "carreira",
+    "kind": "course",
+    "accent": "#004E89",
+    "cohort": "457",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "onboarding",
+      "parceiros"
+    ]
+  },
+  {
+    "slug": "plan-consultor-invest",
+    "active": false,
+    "sourceTag": "plan-consultorinvest",
+    "title": "Plan Consultor de Investimentos",
+    "description": "Planejamento para consultoria de investimentos.",
+    "categoryId": "certificacoes",
+    "kind": "course",
+    "accent": "#002962",
+    "cohort": "4116",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "consultor",
+      "investimentos",
+      "plan"
+    ]
+  },
+  {
+    "slug": "susepe",
+    "active": false,
+    "sourceTag": "susepe",
+    "title": "SUSEPE",
+    "description": "Preparação para o concurso da SUSEPE.",
+    "categoryId": "concursos",
+    "kind": "course",
+    "accent": "#407BA7",
+    "cohort": "4137",
+    "officialPriceCents": 480000,
+    "priceCents": 240000,
+    "featured": false,
+    "keywords": [
+      "susepe",
+      "concurso"
+    ]
+  }
+]
