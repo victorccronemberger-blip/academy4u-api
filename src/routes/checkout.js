@@ -188,7 +188,7 @@ function parsePayment(input) {
   return { method: input.method, installments };
 }
 
-async function quoteFromBody(body, store, checkoutIdentity = null) {
+async function quoteFromBody(body, store, checkoutIdentity = null, productResolver = undefined) {
   if (Array.isArray(body?.courseIds)) {
     if (!checkoutIdentity?.userId || typeof store?.createLmsCheckoutQuote !== "function") {
       throw new CheckoutInputError("SessÃ£o de pagamento invÃ¡lida.", "invalid_checkout_session");
@@ -218,7 +218,7 @@ async function quoteFromBody(body, store, checkoutIdentity = null) {
   const coupon = normalized && Array.isArray(slugs)
     ? await store?.getEligibleCoupon(normalized, [...new Set(slugs)])
     : null;
-  return createAuthoritativeQuote({ slugs, couponCode }, store ? { coupon } : {});
+  return createAuthoritativeQuote({ slugs, couponCode }, { coupon, productResolver });
 }
 
 function checkoutFingerprint(body) {
@@ -251,7 +251,7 @@ function dueDate() {
   return date.toISOString().slice(0, 10);
 }
 
-async function findOrCreateCustomer(asaasClient, buyer, key) {
+async function findOrCreateCustomer(asaasClient, buyer, key, referencePrefix = "academy") {
   const existing = await asaasClient.findCustomersByDocument(buyer.cpfCnpj);
   const match = Array.isArray(existing?.data) ? existing.data.find((customer) => customer?.id) : null;
   if (match) return providerId(match.id, "customer id");
@@ -267,19 +267,19 @@ async function findOrCreateCustomer(asaasClient, buyer, key) {
       province: buyer.address.district ?? undefined,
       postalCode: buyer.address.postCode ?? undefined,
     } : {}),
-    externalReference: `academy-customer:${key}`,
+    externalReference: `${referencePrefix}-customer:${key}`,
   });
   return providerId(created?.id, "customer id");
 }
 
-function paymentPayload({ customerId, quote, payment, key, buyer, card }) {
+function paymentPayload({ customerId, quote, payment, key, buyer, card, referencePrefix = "academy" }) {
   const pixMethod = payment.method === "pix" || payment.method === "pix_installment";
   const payload = {
     customer: customerId,
     billingType: pixMethod ? "PIX" : "CREDIT_CARD",
     dueDate: dueDate(),
     description: quote.lines.map((line) => line.product.title).join(" + ").slice(0, 500),
-    externalReference: `academy:${key}`,
+    externalReference: `${referencePrefix}:${key}`,
   };
   if (payment.method === "credit_card") {
     payload.creditCard = card;
@@ -340,6 +340,7 @@ export function createCheckoutRouter(express, {
   asaasClient,
   installmentService,
   store,
+  productResolver,
   onAccessGranted = null,
 }) {
   const router = express.Router();
@@ -407,7 +408,7 @@ export function createCheckoutRouter(express, {
         ? await authorizeCheckout(request, response)
         : null;
       if (Array.isArray(request.body?.courseIds) && !checkoutIdentity) return;
-      quote = await quoteFromBody(request.body, store, checkoutIdentity);
+      quote = await quoteFromBody(request.body, store, checkoutIdentity, productResolver);
     } catch (error) {
       if (handleInputError(error, response)) return;
       throw error;
@@ -452,7 +453,7 @@ export function createCheckoutRouter(express, {
     let payment;
     try {
       key = idempotencyKey(request);
-      quote = await quoteFromBody(request.body, store, checkoutIdentity);
+      quote = await quoteFromBody(request.body, store, checkoutIdentity, productResolver);
       buyer = parseBuyer(request.body?.buyer, request.ip);
       payment = parsePayment(request.body?.payment);
       if (payment.method === "credit_card") {
@@ -499,7 +500,10 @@ export function createCheckoutRouter(express, {
         response.status(result.status).json(result.body);
         return;
       }
-      quote = createAuthoritativeQuote({ slugs: request.body?.slugs, couponCode: quote.coupon.code }, { coupon: reserved });
+      quote = createAuthoritativeQuote(
+        { slugs: request.body?.slugs, couponCode: quote.coupon.code },
+        { coupon: reserved, productResolver },
+      );
     }
 
     let couponReservationBound = false;
@@ -515,7 +519,12 @@ export function createCheckoutRouter(express, {
         throw new CheckoutInputError("O parcelamento escolhido não está disponível.", "invalid_installments");
       }
 
-      const customerId = await findOrCreateCustomer(asaasClient, buyer, key);
+      const customerId = await findOrCreateCustomer(
+        asaasClient,
+        buyer,
+        key,
+        environment.paymentReferencePrefix,
+      );
       const providerPayment = await asaasClient.createPayment(paymentPayload({
         customerId,
         quote,
@@ -523,6 +532,7 @@ export function createCheckoutRouter(express, {
         key,
         buyer,
         card: payment.card,
+        referencePrefix: environment.paymentReferencePrefix,
       }));
       const orderId = providerId(providerPayment?.id);
       persistedOrderId = orderId;

@@ -75,6 +75,7 @@ export function createMySqlStore(databaseUrl) {
         }
       }
       const statements = [
+        `CREATE TABLE IF NOT EXISTS academy_schema_migrations (version INT UNSIGNED PRIMARY KEY, name VARCHAR(120) NOT NULL, applied_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3))`,
         `CREATE TABLE IF NOT EXISTS academy_products (slug VARCHAR(80) PRIMARY KEY, source_tag VARCHAR(80) NOT NULL, title VARCHAR(180) NOT NULL, description TEXT NOT NULL, category_id VARCHAR(60) NOT NULL, kind VARCHAR(32) NOT NULL, accent CHAR(7) NULL, cohort VARCHAR(40) NULL, course_year VARCHAR(8) NULL, official_price_cents INT UNSIGNED NOT NULL, price_cents INT UNSIGNED NOT NULL, featured TINYINT(1) NOT NULL DEFAULT 0, active TINYINT(1) NOT NULL DEFAULT 1, sort_order INT NOT NULL DEFAULT 0, image_url VARCHAR(500) NULL, image_600_url VARCHAR(500) NULL, image_alt VARCHAR(255) NULL, keywords_json JSON NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), INDEX academy_products_active_order (active,sort_order,title), UNIQUE INDEX academy_products_source_tag (source_tag))`,
         `CREATE TABLE IF NOT EXISTS academy_coupons (id CHAR(36) PRIMARY KEY, code VARCHAR(32) NOT NULL UNIQUE, discount_bps SMALLINT UNSIGNED NOT NULL, active TINYINT(1) NOT NULL DEFAULT 1, starts_at DATETIME(3) NULL, ends_at DATETIME(3) NULL, max_redemptions INT UNSIGNED NULL, product_scope_json JSON NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), INDEX academy_coupons_active (active, starts_at, ends_at))`,
         `CREATE TABLE IF NOT EXISTS academy_orders (id CHAR(36) PRIMARY KEY, provider VARCHAR(24) NOT NULL, provider_order_id VARCHAR(80) NOT NULL, provider_group_id VARCHAR(80) NULL, status VARCHAR(32) NOT NULL, buyer_email VARCHAR(160) NULL, buyer_cpf VARCHAR(14) NULL, buyer_name VARCHAR(180) NULL, buyer_phone VARCHAR(13) NULL, buyer_birth_date VARCHAR(10) NULL, buyer_address_json JSON NULL, payment_method VARCHAR(24) NULL, installments TINYINT UNSIGNED NULL, installment_cents INT UNSIGNED NULL, subtotal_cents INT UNSIGNED NOT NULL, discount_cents INT UNSIGNED NOT NULL, total_cents INT UNSIGNED NOT NULL, paid_cents INT UNSIGNED NOT NULL DEFAULT 0, paid_installments TINYINT UNSIGNED NOT NULL DEFAULT 0, access_granted_at DATETIME(3) NULL, coupon_code VARCHAR(32) NULL, coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX academy_orders_provider_order (provider, provider_order_id), INDEX academy_orders_provider_group (provider, provider_group_id), INDEX academy_orders_status_updated (status, updated_at))`,
@@ -137,6 +138,10 @@ export function createMySqlStore(databaseUrl) {
         );
         if (!existing) await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
       }
+      await pool.query(
+        "INSERT IGNORE INTO academy_schema_migrations (version,name) VALUES (?,?)",
+        [1, "baseline_multi_tenant_payment_schema"],
+      );
     })();
     return ready;
   }

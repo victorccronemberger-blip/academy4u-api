@@ -2,7 +2,7 @@ import { createAuthoritativeQuote, CheckoutValidationError } from "../domain/quo
 import { normalizeCouponCode } from "../domain/coupons.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 
-export function createPublicCommerceRouter(express, { store }) {
+export function createPublicCommerceRouter(express, { store, productResolver }) {
   const router = express.Router();
   const limiter = createFixedWindowLimiter();
 
@@ -17,7 +17,7 @@ export function createPublicCommerceRouter(express, { store }) {
       const stored = code && Array.isArray(slugs)
         ? await store.getEligibleCoupon(code, [...new Set(slugs)])
         : null;
-      const quote = createAuthoritativeQuote({ slugs, couponCode: code }, { coupon: stored });
+      const quote = createAuthoritativeQuote({ slugs, couponCode: code }, { coupon: stored, productResolver });
       response.json({
         coupon: quote.coupon ? { code: quote.coupon.code, discountBps: quote.coupon.discountBps } : null,
         lines: quote.lines.map((line) => ({

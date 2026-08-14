@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { createApp } from "./application.js";
 
-const { app, environment, ready, store } = createApp();
+const { app, environment, ready, stores, tenants } = createApp();
 const server = app.listen(environment.port, environment.host, () => {
-  console.log(`ACADEMY4U API listening on ${environment.host}:${environment.port}`);
+  console.log(`Payments API listening on ${environment.host}:${environment.port}`, {
+    tenants: tenants.map((tenant) => tenant.id),
+  });
   if (environment.asaasApiKey) {
     console.log("ACADEMY4U API provider credential loaded.", {
       environment: environment.asaasEnvironment,
@@ -15,10 +17,10 @@ const server = app.listen(environment.port, environment.host, () => {
 
 ready
   .then(() => {
-    console.log("ACADEMY4U API persistent store is ready.");
+    console.log("Payments API persistent stores are ready.");
   })
   .catch((error) => {
-    console.error("ACADEMY4U API could not initialize its persistent store.", {
+    console.error("Payments API could not initialize its persistent stores.", {
       code: error?.code,
       errno: error?.errno,
       sqlState: error?.sqlState,
@@ -31,7 +33,7 @@ function shutdown(signal) {
   console.log(`ACADEMY4U API received ${signal}.`);
   server.close(async (error) => {
     try {
-      await store.close();
+      await Promise.all([...stores.values()].map((store) => store.close()));
     } catch (closeError) {
       console.error("ACADEMY4U API could not close its persistent store.", {
         type: closeError?.name,

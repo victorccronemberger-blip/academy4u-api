@@ -32,7 +32,8 @@ export function createAuthoritativeQuote(input, options = {}) {
     throw new CheckoutValidationError("Revise os produtos do carrinho.", "invalid_cart");
   }
 
-  const products = slugs.map(getCheckoutProduct);
+  const productResolver = options.productResolver ?? getCheckoutProduct;
+  const products = slugs.map(productResolver);
   if (products.some((product) => !product)) {
     throw new CheckoutValidationError("Um produto não está disponível para pagamento.", "product_unavailable");
   }

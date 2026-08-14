@@ -59,13 +59,14 @@ export function getEnvironment(source = process.env) {
       || source.ACADEMY4U_SUCCESS_ORIGIN?.trim()
       || "https://academy4u.com.br",
     mysqlUrl: source.MYSQL_URL?.trim()
-      || source.GALATIC_DATABASE_URL?.trim()
+      || (!source.PAYMENT_TENANTS ? source.GALATIC_DATABASE_URL?.trim() : null)
       || null,
     // Segredo compartilhado com o frontend (LMS): criação de pedidos via
     // chamada servidor-a-servidor (cabeçalho x-academy-trusted-token).
     trustedCheckoutToken: source.TRUSTED_CHECKOUT_TOKEN?.trim()
       || source.ACADEMY4U_TRUSTED_CHECKOUT_TOKEN?.trim()
       || null,
+    paymentReferencePrefix: "academy",
     asaasEnvironment,
     asaasRequested,
     asaasProductionApiKey,

@@ -18,7 +18,13 @@ function paymentId(value) {
   return /^[A-Za-z0-9_-]{6,80}$/.test(id) ? id : null;
 }
 
-export function createAsaasWebhookHandler({ environment, store, onAccessGranted, onAccessRevoked }) {
+export function createAsaasWebhookHandler({
+  environment,
+  store,
+  onAccessGranted,
+  onAccessRevoked,
+  referencePrefix = "academy",
+}) {
   return async function asaasWebhook(request, response) {
     if (!environment.asaasWebhookToken && !environment.asaasWebhookTokenHash) {
       response.status(503).json({ error: "webhook_not_configured" });
@@ -42,7 +48,7 @@ export function createAsaasWebhookHandler({ environment, store, onAccessGranted,
       !/^PAYMENT_[A-Z_]+$/.test(event)
       || !/^[A-Za-z0-9_&.-]{6,128}$/.test(eventId)
       || !orderId
-      || !externalReference.startsWith("academy:")
+      || !externalReference.startsWith(`${referencePrefix}:`)
     ) {
       response.status(400).json({ error: "invalid_webhook" });
       return;

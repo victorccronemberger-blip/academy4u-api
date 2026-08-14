@@ -28,8 +28,21 @@ function normalize(product) {
   });
 }
 
-export function replaceCatalogProducts(products) {
+export function createCatalogSnapshot(products) {
   const rows = (Array.isArray(products) ? products : []).filter((product) => product.active !== false).map(normalize);
+  if (!rows.length) throw new Error("Catalog cannot be empty.");
+  if (new Set(rows.map((product) => product.slug)).size !== rows.length) throw new Error("Catalog contains duplicate slugs.");
+  const checkout = new Map(rows.filter((product) => product.purchasable).map((product) => [product.slug, product]));
+  return Object.freeze({
+    products: Object.freeze(rows),
+    getCheckoutProduct(slug) {
+      return checkout.get(slug) ?? null;
+    },
+  });
+}
+
+export function replaceCatalogProducts(products) {
+  const rows = createCatalogSnapshot(products).products;
   if (!rows.length) throw new Error("O catálogo de produtos está vazio.");
   if (new Set(rows.map((product) => product.slug)).size !== rows.length) throw new Error("O catálogo contém slugs duplicados.");
   productsBySlug = new Map(rows.map((product) => [product.slug, product]));
