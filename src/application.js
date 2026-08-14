@@ -111,7 +111,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       .then(() => store.ensureSchema())
       .then(() => tenant.id === "galatic" ? [] : store.listCatalogProducts())
       .then((products) => {
-        if (!products.length && environment.nodeEnvironment === "production") {
+        if (tenant.id !== "galatic" && !products.length && environment.nodeEnvironment === "production") {
           throw new Error(`O catálogo de ${tenant.id} está vazio.`);
         }
         if (products.length) {
