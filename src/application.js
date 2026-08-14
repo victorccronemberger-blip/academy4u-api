@@ -11,8 +11,11 @@ import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createPublicCommerceRouter } from "./routes/public.js";
+import { createGalaticCheckoutRouter } from "./routes/galatic-checkout.js";
+import { createGalaticShippingRouter } from "./routes/galatic-shipping.js";
 import { createInstallmentService } from "./services/installment-service.js";
 import { createInMemoryStore } from "./store/in-memory-store.js";
+import { createGalaticMySqlStore } from "./store/galatic-mysql-store.js";
 import { createMySqlStore } from "./store/mysql-store.js";
 
 function createAccessCallbacks(tenant, store) {
@@ -79,11 +82,15 @@ export function createApp(overrides = {}, dependencies = {}) {
       mysqlUrl: tenant.mysqlUrl,
       trustedCheckoutToken: tenant.trustedCheckoutToken,
       paymentReferencePrefix: tenant.referencePrefix,
+      successOrigin: source[`${tenant.variablePrefix}_SUCCESS_ORIGIN`]?.trim() || tenant.publicOrigin,
+      galaticEnviaApiKey: environment.galaticEnviaApiKey,
     };
     const injectedStore = dependencies.stores?.[tenant.id]
       ?? (tenant.isDefault ? dependencies.store : null);
     const store = injectedStore
-      ?? (tenant.mysqlUrl ? createMySqlStore(tenant.mysqlUrl) : createInMemoryStore());
+      ?? (tenant.mysqlUrl
+        ? (tenant.id === "galatic" ? createGalaticMySqlStore(tenant.mysqlUrl) : createMySqlStore(tenant.mysqlUrl))
+        : createInMemoryStore());
     const installmentService = dependencies.installmentServices?.[tenant.id]
       ?? (tenant.isDefault ? dependencies.installmentService : null)
       ?? createInstallmentService({ asaasClient, store });
@@ -102,7 +109,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     };
     context.dataReady = Promise.resolve()
       .then(() => store.ensureSchema())
-      .then(() => store.listCatalogProducts())
+      .then(() => tenant.id === "galatic" ? [] : store.listCatalogProducts())
       .then((products) => {
         if (!products.length && environment.nodeEnvironment === "production") {
           throw new Error(`O catálogo de ${tenant.id} está vazio.`);
@@ -243,6 +250,24 @@ export function createApp(overrides = {}, dependencies = {}) {
 
   for (const context of contexts.values()) {
     const middleware = [tenantOrigin(context.tenant), tenantReadiness(context)];
+    if (context.tenant.id === "galatic") {
+      app.use("/v1/galatic/checkout", ...middleware, createGalaticCheckoutRouter(express, {
+        environment: context.environment,
+        asaasClient,
+        store: context.store,
+      }));
+      app.use("/v1/galatic/quote", ...middleware, createGalaticShippingRouter(express, {
+        environment: context.environment,
+        store: context.store,
+      }));
+      app.use(`/health/${context.tenant.id}`, createHealthRouter(
+        express,
+        context.environment,
+        context.readiness,
+        context.waitForReady,
+      ));
+      continue;
+    }
     const base = `/v1/platforms/${context.tenant.id}`;
     app.use(`${base}/checkout`, ...middleware, createCheckoutRouter(express, {
       environment: context.environment,

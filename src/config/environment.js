@@ -67,6 +67,7 @@ export function getEnvironment(source = process.env) {
       || source.ACADEMY4U_TRUSTED_CHECKOUT_TOKEN?.trim()
       || null,
     paymentReferencePrefix: "academy",
+    galaticEnviaApiKey: source.GALATIC_ENVIA_API_KEY?.trim() || null,
     asaasEnvironment,
     asaasRequested,
     asaasProductionApiKey,

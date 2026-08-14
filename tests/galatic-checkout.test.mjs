@@ -1,0 +1,44 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createApp } from "../src/application.js";
+
+function store() {
+  const state = { attached: null, completed: null };
+  return {
+    state,
+    ensureSchema: async () => {}, close: async () => {},
+    prepareOrder: async () => ({ kind: "created", order: { id: "52c02ff3-b755-4df5-90ba-20ea8c8bd035", subtotalCents: 44999, shippingCents: 2500, totalCents: 47499, lines: [{ sku: "DEP001", title: "Deep Regrets", quantity: 1, unitAmountCents: 44999 }] } }),
+    attachPayment: async (...args) => { state.attached = args; },
+    completeCheckoutAttempt: async (...args) => { state.completed = args; },
+    releaseFailedOrder: async () => assert.fail("order should not be released"),
+    getOrderByPublicId: async () => null,
+    updateOrderFromWebhook: async () => ({ deferred: true }),
+  };
+}
+
+test("creates a server-priced Galatic Pix order with a project-scoped reference", async (context) => {
+  const galaticStore = store(); const calls = [];
+  const asaasClient = {
+    findCustomersByDocument: async () => ({ data: [] }),
+    createCustomer: async () => ({ id: "cus_galatic_1" }),
+    createPayment: async (payload) => { calls.push(payload); return { id: "pay_galatic_1", status: "PENDING", dueDate: payload.dueDate }; },
+    updatePayment: async () => ({ id: "pay_galatic_1", status: "PENDING" }),
+    getPixQrCode: async () => ({ encodedImage: "aW1hZ2U=", payload: "000201GALATIC", expirationDate: "2026-08-15" }),
+  };
+  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+    PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
+    GALATIC_SUCCESS_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: galaticStore }, asaasClient });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve)); const address = server.address();
+  const response = await fetch(`http://127.0.0.1:${address.port}/v1/galatic/checkout/orders`, { method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify({ items: [{ sku: "DEP001", quantity: 1 }], buyer: { firstName: "Victor", lastName: "Cronemberger",
+      email: "victor@example.com", phone: "15997671749", documentNumber: "19100000000",
+      address: { postal_code: "06020190", street: "Avenida Franz Voegeli", number: "501", district: "Parque Continental", city: "Osasco", state: "SP" } },
+      shipping: { quoteId: "93b448ca-3dcc-43cd-9d14-02e14745695f" }, payment: { method: "pix" } }),
+  });
+  assert.equal(response.status, 201); const body = await response.json();
+  assert.equal(body.orderId, "52c02ff3-b755-4df5-90ba-20ea8c8bd035"); assert.equal(body.totalCents, 47499);
+  assert.equal(calls[0].value, 474.99); assert.equal(calls[0].externalReference, "galatic:52c02ff3-b755-4df5-90ba-20ea8c8bd035");
+  assert.deepEqual(galaticStore.state.attached, ["52c02ff3-b755-4df5-90ba-20ea8c8bd035", "pay_galatic_1", "open"]);
+});
