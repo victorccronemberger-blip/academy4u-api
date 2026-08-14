@@ -370,11 +370,12 @@ export function createMySqlStore(databaseUrl) {
       const [[row]] = await pool.query(
         `SELECT id,tokenable_id,abilities,expires_at FROM personal_access_tokens
          WHERE id=? AND token=? AND tokenable_type='App\\\\Models\\\\User'
-           AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1`,
+           AND (expires_at IS NULL OR expires_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 3 HOUR)) LIMIT 1`,
         [match[1], tokenHash],
       );
-      // Laravel stores this DATETIME in the database session timezone. Let
-      // MySQL compare it with NOW() instead of reinterpreting it as UTC in Node.
+      // Laravel stores this timezone-less DATETIME in America/Sao_Paulo. Use
+      // an explicit UTC-03 comparison so the Node/MySQL UTC session cannot
+      // make a newly issued token appear three hours old.
       if (!row) return null;
       const abilities = fromJson(row.abilities, []);
       if (!Array.isArray(abilities) || !abilities.includes("asaas:checkout")) return null;
