@@ -369,10 +369,13 @@ export function createMySqlStore(databaseUrl) {
       const tokenHash = crypto.createHash("sha256").update(match[2]).digest("hex");
       const [[row]] = await pool.query(
         `SELECT id,tokenable_id,abilities,expires_at FROM personal_access_tokens
-         WHERE id=? AND token=? AND tokenable_type='App\\\\Models\\\\User' LIMIT 1`,
+         WHERE id=? AND token=? AND tokenable_type='App\\\\Models\\\\User'
+           AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1`,
         [match[1], tokenHash],
       );
-      if (!row || (row.expires_at && +new Date(row.expires_at) <= Date.now())) return null;
+      // Laravel stores this DATETIME in the database session timezone. Let
+      // MySQL compare it with NOW() instead of reinterpreting it as UTC in Node.
+      if (!row) return null;
       const abilities = fromJson(row.abilities, []);
       if (!Array.isArray(abilities) || !abilities.includes("asaas:checkout")) return null;
       const [[user]] = await pool.query("SELECT id FROM users WHERE id=? AND status=1 LIMIT 1", [row.tokenable_id]);
