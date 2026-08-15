@@ -148,6 +148,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   });
 
   router.get("/orders", async (_request, response) => response.json({ orders: await store.adminListOrders() }));
+  router.get("/alerts", async (_request, response) => response.json({ alerts: await store.adminListOperationalAlerts() }));
   router.get("/orders/:id", async (request, response) => {
     const result = await store.adminOrder(request.params.id); return result ? response.json(result) : response.status(404).json({ error: "order_not_found" });
   });
@@ -285,6 +286,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   router.get("/integrations", (_request, response) => response.json({ integrations: {
     database: { configured: true, service: "MySQL Galatic isolado" },
     asaas: { configured: Boolean(environment.checkoutEnabled), mode: environment.asaasEnvironment, service: "Pix e cartão" },
+    payment_maintenance: { configured: Boolean(environment.galaticPaymentMaintenanceEnabled),
+      service: `Expiração Pix ${environment.galaticPixReservationMinutes} min · cartão ${environment.galaticCardReservationMinutes} min` },
     envia: { configured: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin), mode: environment.galaticEnviaEnvironment,
       webhook: Boolean(environment.galaticEnviaWebhookSecret || environment.galaticEnviaWebhookToken), service: "Envia" },
     mail: { configured: Boolean(notifications?.ready), service: "SMTP Galatic" },
@@ -298,6 +301,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     const checks = [
       { key: "database", label: "Banco Galatic isolado", required: true, passed: true },
       { key: "checkout", label: "Asaas sandbox/produção configurado", required: true, passed: Boolean(environment.checkoutEnabled) },
+      { key: "payment_maintenance", label: "Expiração segura de reservas abandonadas", required: true,
+        passed: Boolean(environment.galaticPaymentMaintenanceEnabled) },
       { key: "shipping", label: "Envia e origem de postagem", required: true, passed: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin) },
       { key: "shipping_webhook", label: "Webhook autenticado de rastreio Envia", required: true,
         passed: Boolean(environment.galaticEnviaWebhookSecret || environment.galaticEnviaWebhookToken) },

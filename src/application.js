@@ -279,6 +279,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       checkout: context.readiness.status === "ready" && environment.checkoutEnabled,
       ...(id === "galatic" ? {
         transactionalEmail: Boolean(galaticNotifications?.ready),
+        paymentMaintenance: Boolean(context.environment.galaticPaymentMaintenanceEnabled),
         shipping: Boolean(context.environment.galaticEnviaApiKey && context.environment.galaticShippingOrigin),
         shippingProvider: context.environment.galaticEnviaApiKey ? "envia" : null,
         shippingOrigin: Boolean(context.environment.galaticShippingOrigin),

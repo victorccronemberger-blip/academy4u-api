@@ -1025,6 +1025,17 @@ export function createGalaticMySqlStore(databaseUrl) {
       );
       return rows.map((row) => ({ ...row, total: Number(row.total) }));
     },
+    async adminListOperationalAlerts(limit = 100) {
+      await ensureSchema();
+      const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 500));
+      const [rows] = await pool.query(
+        `SELECT id,alert_type,severity,source,summary,context_json,occurred_at
+         FROM galatic_operational_alerts ORDER BY occurred_at DESC LIMIT ?`, [safeLimit],
+      );
+      return rows.map((row) => ({ ...row,
+        context: typeof row.context_json === "string" ? JSON.parse(row.context_json) : row.context_json,
+        context_json: undefined }));
+    },
     async adminOrder(orderId) {
       await ensureSchema();
       const [[order]] = await pool.query(
