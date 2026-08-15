@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "node scripts/validate-build.mjs",
+    "galatic:audit-production": "node scripts/audit-galatic-production.mjs",
     "start": "node src/server.js",
     "test": "node --test tests/*.test.mjs"
   },
