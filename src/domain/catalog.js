@@ -61,36 +61,6 @@ export function getSourceTag(slug) { return sourceTagBySlug.get(slug) ?? null; }
 export function getCohort(slug) { return cohortBySlug.get(slug) ?? null; }
 export function getCohortBySourceTag(sourceTag) { return cohortBySourceTag.get(sourceTag) ?? null; }
 
-// Self-healing de cohort em memória (2026-08-01): o motor ART descobre a turma
-// viva ao ativar; quando ela diverge do cohort gravado, atualiza o catálogo em
-// memória + o banco (via store.updateProductCohortBySourceTag) para o cohort
-// nunca ficar stale entre reboots.
-export function syncCohortBySourceTag(sourceTag, cohort) {
-  const value = String(cohort ?? "").trim();
-  if (!value || !sourceTag) return;
-  cohortBySourceTag.set(sourceTag, value);
-  for (const [slug, tag] of sourceTagBySlug) {
-    if (tag === sourceTag) cohortBySlug.set(slug, value);
-  }
-}
-
-// Turmas de COMBO/derivadas por sourceTag (VETOR E da pesquisa Metodos-Toro
-// 2026-08-01). O app do aluno (findCoursesByStudent) só lista o curso quando o
-// id_turma da order pertence ao catálogo vigente — e para alguns cursos a turma
-// que o APP aceita é a do produto combo, NÃO a do prepare do curso solo.
-// Caso real: cfa_2025 — prepare devolve 3235 (invisível), o combo devolve 4134
-// (visível). Estes são apenas HINTS adicionais; o flip tenta cada um e valida
-// por polling.
-const COMBO_TURMAS_BY_SOURCE_TAG = Object.freeze({
-  cfa_2025: ["4134"],        // combo cfa-combol1l2l3
-  "cfp-2026_54": [],         // sem combo conhecido — vazio é seguro
-});
-
-export function getComboTurmas(sourceTag) {
-  const value = COMBO_TURMAS_BY_SOURCE_TAG[sourceTag];
-  return value ? value.map(String) : [];
-}
-
 // Mantém testes unitários e o modo local utilizáveis. Em produção a fotografia é
 // substituída obrigatoriamente pelos cursos reais do LMS antes de aceitar tráfego.
 replaceCatalogProducts(developmentCatalogSeed);

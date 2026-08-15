@@ -15,6 +15,17 @@ const server = app.listen(environment.port, environment.host, () => {
   }
 });
 
+// Hardening do servidor HTTP: sem esses limites, conexões lentas/ocupadas
+// seguram sockets do processo por tempo indeterminado e um cliente travado
+// pode esgotar os recursos do host compartilhado.
+// keepAliveTimeout fica acima do idle timeout típico de proxies (60s) para o
+// proxy encerrar primeiro e evitar corrida de reuso de conexão.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
+// Teto total por requisição: nenhuma rota desta API deve demorar mais que a
+// chamada mais lenta ao provedor de pagamento (65s).
+server.requestTimeout = 75_000;
+
 ready
   .then(() => {
     console.log("Payments API persistent stores are ready.");
@@ -29,9 +40,24 @@ ready
     });
   });
 
-function shutdown(signal) {
+let shuttingDown = false;
+
+function shutdown(signal, exitCode = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`ACADEMY4U API received ${signal}.`);
+  // Libera imediatamente as conexões keep-alive ociosas; sem isso o
+  // server.close() pode aguardar minutos por sockets que nunca fecham.
+  server.closeIdleConnections?.();
+  // Se o dreno ordenado não concluir (ex.: requisição longa em voo), força a
+  // saída para o orquestrador poder reiniciar o processo.
+  const forceExit = setTimeout(() => {
+    console.error("ACADEMY4U API graceful shutdown timed out; forcing exit.");
+    process.exit(1);
+  }, 10_000);
+  forceExit.unref();
   server.close(async (error) => {
+    clearTimeout(forceExit);
     try {
       await Promise.all([...stores.values()].map((store) => store.close()));
     } catch (closeError) {
@@ -40,9 +66,29 @@ function shutdown(signal) {
       });
       error ??= closeError;
     }
-    process.exitCode = error ? 1 : 0;
+    process.exitCode = error ? 1 : exitCode;
   });
 }
 
 process.once("SIGINT", () => shutdown("SIGINT"));
 process.once("SIGTERM", () => shutdown("SIGTERM"));
+
+// Falhas assíncronas não tratadas não devem derrubar o processo em silêncio:
+// registram com contexto e seguem. Já uma exceção síncrona não capturada deixa
+// o estado do processo imprevisível — registra e inicia shutdown controlado.
+process.on("unhandledRejection", (reason) => {
+  console.error("ACADEMY4U API unhandled promise rejection.", {
+    type: reason?.name,
+    code: reason?.code,
+    message: reason?.message,
+  });
+});
+process.on("uncaughtException", (error) => {
+  console.error("ACADEMY4U API uncaught exception; shutting down.", {
+    type: error?.name,
+    code: error?.code,
+    message: error?.message,
+    stack: error?.stack,
+  });
+  shutdown("uncaughtException", 1);
+});

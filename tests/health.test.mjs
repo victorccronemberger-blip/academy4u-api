@@ -457,7 +457,7 @@ test("creates a ten-installment embedded card payment without exposing a redirec
     installments: 10,
     installmentCents: 7_500,
     totalCents: 75_000,
-    message: "Pagamento recebido e em anÃ¡lise.",
+    message: "Pagamento recebido e em análise.",
   });
   assert.equal(calls[0].billingType, "CREDIT_CARD");
   assert.equal(calls[0].installmentCount, 10);
@@ -821,7 +821,7 @@ test("accepts a one-use Sanctum checkout token for an embedded LMS card payment"
       discountCents: 0,
       totalCents: 59_700,
       lines: [{
-        product: { slug: "preparatorio-ancord-agentes-autonomos", title: "PreparatÃ³rio ANCORD", courseId: 8 },
+        product: { slug: "preparatorio-ancord-agentes-autonomos", title: "Preparatório ANCORD", courseId: 8 },
         basePriceCents: 59_700,
         discountCents: 0,
         finalPriceCents: 59_700,
@@ -839,7 +839,7 @@ test("accepts a one-use Sanctum checkout token for an embedded LMS card payment"
         billingType: "CREDIT_CARD",
         value: 597,
         dueDate: "2026-08-09",
-        description: "PreparatÃ³rio ANCORD",
+        description: "Preparatório ANCORD",
         externalReference: payload.externalReference,
       };
     },

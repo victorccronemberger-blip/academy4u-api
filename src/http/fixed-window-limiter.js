@@ -2,6 +2,9 @@ export function createFixedWindowLimiter({
   limit = 12,
   windowMs = 60_000,
   now = () => Date.now(),
+  // Aceito pelas rotas para legibilidade da configuração; cada instância tem
+  // seu próprio Map de janelas, então o prefixo é apenas documentação.
+  prefix: _prefix,
 } = {}) {
   const windows = new Map();
 

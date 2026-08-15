@@ -6,6 +6,7 @@ import { assertTenantIsolation, getTenantDefinitions } from "./config/tenants.js
 import { createCatalogSnapshot, getCheckoutProduct, replaceCatalogProducts } from "./domain/catalog.js";
 import { requestContext } from "./http/request-context.js";
 import { jsonErrorHandler } from "./http/error-handler.js";
+import { createFixedWindowLimiter } from "./http/fixed-window-limiter.js";
 import { createAsaasClient } from "./integrations/asaas/client.js";
 import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
@@ -304,7 +305,11 @@ export function createApp(overrides = {}, dependencies = {}) {
     productResolver: defaultContext.productResolver,
   }));
 
-  app.post("/v1/webhooks/asaas", (request, response) => {
+  // O webhook é a única rota exposta à internet sem CORS/origem. Sem limite,
+  // um flood de POSTs (mesmo autenticados) martelaria o banco na deduplicação.
+  // Teto generoso por IP: a Asaas reenvia eventos, nunca em rajada contínua.
+  const webhookLimiter = createFixedWindowLimiter({ limit: 240, windowMs: 60_000 });
+  app.post("/v1/webhooks/asaas", webhookLimiter, (request, response) => {
     const externalReference = String(request.body?.payment?.externalReference ?? "").trim();
     const prefix = externalReference.split(":", 1)[0].toLowerCase();
     const context = referenceContexts.get(prefix);

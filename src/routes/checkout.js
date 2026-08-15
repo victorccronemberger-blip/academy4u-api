@@ -11,6 +11,7 @@ import { CheckoutValidationError, createAuthoritativeQuote } from "../domain/quo
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 import { providerId } from "../domain/provider-values.js";
+import { normalizeBrazilianTaxId } from "../domain/brazilian-tax-id.js";
 import { CreditCardInputError, cardHolderInfo, parseCreditCard } from "../domain/credit-card.js";
 
 class CheckoutInputError extends Error {
@@ -37,41 +38,9 @@ function cleanDigits(value, min, max, label) {
   return digits;
 }
 
-function hasRepeatedDigits(value) {
-  return /^(\d)\1+$/.test(value);
-}
-
-function isValidCpf(value) {
-  if (value.length !== 11 || hasRepeatedDigits(value)) return false;
-  const calculateDigit = (length) => {
-    let sum = 0;
-    for (let index = 0; index < length; index += 1) {
-      sum += Number(value[index]) * (length + 1 - index);
-    }
-    const remainder = (sum * 10) % 11;
-    return remainder === 10 ? 0 : remainder;
-  };
-  return calculateDigit(9) === Number(value[9])
-    && calculateDigit(10) === Number(value[10]);
-}
-
-function isValidCnpj(value) {
-  if (value.length !== 14 || hasRepeatedDigits(value)) return false;
-  const calculateDigit = (length) => {
-    const weights = length === 12
-      ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
-      : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
-    const sum = weights.reduce((total, weight, index) => total + Number(value[index]) * weight, 0);
-    const remainder = sum % 11;
-    return remainder < 2 ? 0 : 11 - remainder;
-  };
-  return calculateDigit(12) === Number(value[12])
-    && calculateDigit(13) === Number(value[13]);
-}
-
 function cleanDocument(value) {
-  const document = cleanDigits(value, 11, 14, "CPF ou CNPJ");
-  if (!isValidCpf(document) && !isValidCnpj(document)) {
+  const document = normalizeBrazilianTaxId(value);
+  if (!document) {
     throw new CheckoutInputError("CPF ou CNPJ inválido.", "invalid_document");
   }
   return document;
@@ -191,7 +160,7 @@ function parsePayment(input) {
 async function quoteFromBody(body, store, checkoutIdentity = null, productResolver = undefined) {
   if (Array.isArray(body?.courseIds)) {
     if (!checkoutIdentity?.userId || typeof store?.createLmsCheckoutQuote !== "function") {
-      throw new CheckoutInputError("SessÃ£o de pagamento invÃ¡lida.", "invalid_checkout_session");
+      throw new CheckoutInputError("Sessão de pagamento inválida.", "invalid_checkout_session");
     }
     try {
       return await store.createLmsCheckoutQuote({
@@ -202,10 +171,10 @@ async function quoteFromBody(body, store, checkoutIdentity = null, productResolv
       });
     } catch (error) {
       const messages = {
-        invalid_lms_cart: "O carrinho mudou ou contÃ©m um curso indisponÃ­vel.",
-        invalid_lms_recipient: "O destinatÃ¡rio do curso nÃ£o estÃ¡ disponÃ­vel.",
-        already_enrolled: "O aluno jÃ¡ possui um dos cursos selecionados.",
-        invalid_coupon: "Cupom invÃ¡lido ou expirado.",
+        invalid_lms_cart: "O carrinho mudou ou contém um curso indisponível.",
+        invalid_lms_recipient: "O destinatário do curso não está disponível.",
+        already_enrolled: "O aluno já possui um dos cursos selecionados.",
+        invalid_coupon: "Cupom inválido ou expirado.",
       };
       const code = String(error?.message ?? "");
       if (messages[code]) throw new CheckoutInputError(messages[code], code);
@@ -459,7 +428,7 @@ export function createCheckoutRouter(express, {
       if (payment.method === "credit_card") {
         payment.card = parseCreditCard(request.body?.payment?.card);
         if (!buyer.address?.postCode || !buyer.address?.number) {
-          throw new CheckoutInputError("Informe o CEP e o nÃºmero do endereÃ§o de cobranÃ§a.", "invalid_card_address");
+          throw new CheckoutInputError("Informe o CEP e o número do endereço de cobrança.", "invalid_card_address");
         }
       }
     } catch (error) {
@@ -637,7 +606,7 @@ export function createCheckoutRouter(express, {
             totalCents: quote.totalCents,
             message: normalizeAsaasPaymentStatus(updatedPayment?.status ?? providerPayment?.status) === "paid"
               ? "Pagamento aprovado."
-              : "Pagamento recebido e em anÃ¡lise.",
+              : "Pagamento recebido e em análise.",
           },
         };
       }
@@ -734,7 +703,7 @@ export function createCheckoutRouter(express, {
       const orderId = providerId(request.params.orderId);
       const localOrder = await store.getOrderByProviderOrderId("asaas", orderId);
       if (!localOrder || localOrder.paymentMethod !== "pix_installment") {
-        response.status(404).json({ error: "order_not_found", message: "Parcelamento nÃ£o encontrado." });
+        response.status(404).json({ error: "order_not_found", message: "Parcelamento não encontrado." });
         return;
       }
       const plan = await installmentService.sync(localOrder);
@@ -743,7 +712,7 @@ export function createCheckoutRouter(express, {
       console.error("Asaas installment retrieval failed", { status: error?.status, code: error?.code });
       response.status(error?.status === 404 ? 404 : 502).json({
         error: "installment_retrieval_failed",
-        message: "NÃ£o foi possÃ­vel atualizar as parcelas agora.",
+        message: "Não foi possível atualizar as parcelas agora.",
       });
     }
   });
@@ -756,14 +725,14 @@ export function createCheckoutRouter(express, {
       const number = Number(request.params.number);
       const localOrder = await store.getOrderByProviderOrderId("asaas", orderId);
       if (!localOrder || localOrder.paymentMethod !== "pix_installment" || !Number.isSafeInteger(number) || number < 1) {
-        response.status(404).json({ error: "installment_not_found", message: "Parcela nÃ£o encontrada." });
+        response.status(404).json({ error: "installment_not_found", message: "Parcela não encontrada." });
         return;
       }
       await installmentService.sync(localOrder);
       const rows = await store.listPaymentInstallments(localOrder.id);
       const installment = rows.find((row) => Number(row.number) === number);
       if (!installment) {
-        response.status(404).json({ error: "installment_not_found", message: "Parcela nÃ£o encontrada." });
+        response.status(404).json({ error: "installment_not_found", message: "Parcela não encontrada." });
         return;
       }
       if (installment.status === "paid") {
@@ -780,7 +749,7 @@ export function createCheckoutRouter(express, {
       console.error("Asaas installment Pix retrieval failed", { status: error?.status, code: error?.code });
       response.status(error?.status === 404 ? 404 : 502).json({
         error: "installment_pix_retrieval_failed",
-        message: "O Pix desta parcela ainda nÃ£o estÃ¡ disponÃ­vel.",
+        message: "O Pix desta parcela ainda não está disponível.",
       });
     }
   });

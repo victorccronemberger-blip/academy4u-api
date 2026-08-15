@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeBrazilianTaxId } from "../domain/brazilian-tax-id.js";
 import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 
@@ -45,8 +46,10 @@ function buyer(input) {
     district: text(address.district ?? address.bairro, 2, 120, "Bairro"),
     city: text(address.city ?? address.cidade, 2, 120, "Cidade"), state,
   };
+  const document = normalizeBrazilianTaxId(input?.documentNumber);
+  if (!document) throw new GalaticInputError("CPF ou CNPJ inválido.");
   return { firstName, lastName, name: `${firstName} ${lastName}`, email,
-    phone: digits(input?.phone, 10, 13, "Telefone"), document: digits(input?.documentNumber, 11, 14, "CPF ou CNPJ"), address: normalizedAddress };
+    phone: digits(input?.phone, 10, 13, "Telefone"), document, address: normalizedAddress };
 }
 function uuid(request) {
   const key = request.get("Idempotency-Key")?.trim();

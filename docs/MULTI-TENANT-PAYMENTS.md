@@ -8,7 +8,6 @@ resolvidos dentro do contexto de cada plataforma.
 ## Isolamento obrigatório
 
 - `ACADEMY4U_MYSQL_URL` e `GALATIC_MYSQL_URL` devem apontar para bancos diferentes.
-- Cada frontend possui seu próprio `*_TRUSTED_CHECKOUT_TOKEN`.
 - Cada plataforma possui origem HTTPS e prefixo financeiro exclusivos.
 - A API recusa a inicialização se duas plataformas reutilizarem banco, origem ou prefixo.
 - Uma origem Galatic não pode chamar uma rota Academy4u.
@@ -20,8 +19,8 @@ resolvidos dentro do contexto de cada plataforma.
 ```text
 /v1/platforms/academy4u/checkout/*
 /v1/platforms/academy4u/public/*
-/v1/platforms/galatic/checkout/*
-/v1/platforms/galatic/public/*
+/v1/galatic/checkout/*
+/v1/galatic/quote
 /v1/webhooks/asaas
 /health
 /health/academy4u
@@ -30,6 +29,19 @@ resolvidos dentro do contexto de cada plataforma.
 
 As rotas antigas `/v1/checkout/*` e `/v1/public/*` permanecem como aliases da
 primeira plataforma configurada para não interromper a Academy4u.
+
+## Autenticação por plataforma
+
+- **Academy4u**: o checkout exige token Sanctum do aluno
+  (`Authorization: Bearer`, habilidade `asaas:checkout`, revogado após o uso)
+  ou `x-academy-trusted-token` servidor-a-servidor.
+- **Galatic**: o frontend é um site estático e chama a API direto do navegador,
+  portanto não existe segredo servidor-a-servidor utilizável (qualquer token no
+  JavaScript seria público). A proteção do checkout Galatic é feita por
+  validação de origem (`tenantOrigin`), rate limit por IP, `Idempotency-Key`
+  obrigatório, validação de CPF/CNPJ com dígito verificador e recomputação
+  autoritativa de preço, estoque e frete no MySQL. `GALATIC_TRUSTED_CHECKOUT_TOKEN`
+  permanece reservado para uma eventual chamada servidor-a-servidor futura.
 
 ## Asaas
 
@@ -45,21 +57,24 @@ POST https://api.academy4u.com.br/v1/webhooks/asaas
 ```
 
 O `externalReference` tem o formato `academy:<idempotency-key>` ou
-`galatic:<idempotency-key>`. Prefixos desconhecidos são rejeitados antes de
+`galatic:<order-id>`. Prefixos desconhecidos são rejeitados antes de
 qualquer acesso ao MySQL.
 
-## Entrada da Galatic
+## Galatic (loja de produtos físicos)
 
-Antes de incluir `galatic` em `PAYMENT_TENANTS`, é obrigatório criar um adapter
-de catálogo, identidade e entrega compatível com o schema real da Galatic. A
-conexão isolada já está preparada, mas não se deve apontar a API para um banco
-cujo schema ainda não foi mapeado.
+O adapter de banco da Galatic (`src/store/galatic-mysql-store.js`) já está
+implementado: tabelas `galatic_*` próprias, catálogo físico, cotação de frete
+(ViaCEP + Envia.com), controle de estoque transacional e deduplicação de
+webhooks. O checkout é exclusivamente Pix à vista; produto físico não gera
+matrícula — a confirmação move `fulfillment_status` para `paid`.
 
-Critérios de ativação:
+Para incluir `galatic` em `PAYMENT_TENANTS`:
 
-1. schema e migrations da Galatic documentados;
-2. adapter de catálogo e concessão/revogação de acesso testado;
-3. token servidor-servidor diferente do Academy4u;
-4. testes sandbox dos três métodos para cada plataforma;
+1. `GALATIC_PUBLIC_ORIGIN=https://galatic.com.br` e `GALATIC_MYSQL_URL`
+   apontando para o banco remoto da loja;
+2. `GALATIC_ENVIA_API_KEY` para a cotação de frete;
+3. conjunto completo `GALATIC_SHIPPING_*` (remetente/origem das cotações —
+   sem ele a rota de frete falha fechada com 503);
+4. testes sandbox de Pix para cada plataforma;
 5. webhook confirma no banco correto e não toca o outro banco;
 6. teste de restauração dos dois backups.

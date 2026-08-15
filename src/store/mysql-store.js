@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import mysql from "mysql2/promise";
 import { resolveOrderStatus } from "./order-status.js";
 import { summarizeInstallmentPlan } from "../domain/payment-status.js";
+import { hardenedPoolOptions } from "./pool-options.js";
 
 const asJson = (value) => JSON.stringify(value ?? []);
 const fromJson = (value, fallback = []) => {
@@ -46,6 +47,7 @@ export function createMySqlStore(databaseUrl) {
     database: decodeURIComponent(url.pathname.replace(/^\//, "")),
     timezone: "Z",
     dateStrings: true,
+    ...hardenedPoolOptions(),
   });
   let ready;
   async function ensureSchema() {

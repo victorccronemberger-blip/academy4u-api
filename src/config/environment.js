@@ -28,6 +28,27 @@ function parseAsaasApiKey(value) {
   return key.startsWith("aact_") ? `$${key}` : key;
 }
 
+// Remetente/origem das cotações de frete da Galatic. Os dados comerciais
+// ficam exclusivamente nas variáveis de ambiente; sem o conjunto completo a
+// cotação falha fechada (503) em vez de usar valores embutidos no código.
+function parseGalaticShippingOrigin(source) {
+  const value = (key) => source[`GALATIC_SHIPPING_${key}`]?.trim();
+  const digits = (key) => value(key)?.replace(/\D/g, "");
+  const origin = {
+    name: value("NAME"),
+    email: value("EMAIL"),
+    phone: digits("PHONE"),
+    street: value("STREET"),
+    number: value("NUMBER"),
+    district: value("DISTRICT"),
+    city: value("CITY"),
+    state: value("STATE")?.toUpperCase(),
+    postalCode: digits("POSTAL_CODE"),
+    taxId: digits("TAX_ID"),
+  };
+  return Object.values(origin).every(Boolean) ? origin : null;
+}
+
 export function getEnvironment(source = process.env) {
   const asaasEnvironment = parseAsaasEnvironment(source.ASAAS_ENVIRONMENT);
   const asaasProductionApiKey = parseAsaasApiKey(source.ASAAS_API_KEY);
@@ -68,6 +89,7 @@ export function getEnvironment(source = process.env) {
       || null,
     paymentReferencePrefix: "academy",
     galaticEnviaApiKey: source.GALATIC_ENVIA_API_KEY?.trim() || null,
+    galaticShippingOrigin: parseGalaticShippingOrigin(source),
     asaasEnvironment,
     asaasRequested,
     asaasProductionApiKey,

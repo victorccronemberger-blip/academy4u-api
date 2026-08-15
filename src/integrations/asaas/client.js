@@ -24,7 +24,43 @@ function asaasError(body) {
 export function createAsaasClient(environment, fetchImplementation = fetch) {
   if (!environment.asaasAvailable) return null;
 
+  // Semáforo de saída: sem ele, um pico de checkouts dispara chamadas
+  // simultâneas ilimitadas à Asaas, estoura sockets/memória do processo e
+  // provoca 429 no provedor. O excesso falha rápido como erro recuperável.
+  const MAX_CONCURRENT = 8;
+  const MAX_QUEUED = 100;
+  let inFlight = 0;
+  const waitQueue = [];
+
+  function acquireSlot() {
+    if (inFlight < MAX_CONCURRENT) {
+      inFlight += 1;
+      return Promise.resolve();
+    }
+    if (waitQueue.length >= MAX_QUEUED) {
+      return Promise.reject(new AsaasApiError(
+        "O serviço de pagamento está saturado; tente novamente em instantes.",
+        // Saturação local: falha rápida ao chamador (backpressure), sem retry —
+        // re-tentar só aumentaria a pressão sobre a fila.
+        { code: "asaas_overloaded", retryable: false },
+      ));
+    }
+    return new Promise((resolve) => waitQueue.push(resolve));
+  }
+
+  function releaseSlot() {
+    inFlight -= 1;
+    const next = waitQueue.shift();
+    if (next) {
+      inFlight += 1;
+      next();
+    }
+  }
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
   async function request(pathname, { method = "GET", body, timeoutMs = 65_000 } = {}) {
+    await acquireSlot();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let response;
@@ -48,6 +84,7 @@ export function createAsaasClient(environment, fetchImplementation = fetch) {
       });
     } finally {
       clearTimeout(timeout);
+      releaseSlot();
     }
 
     const result = await response.json().catch(() => null);
@@ -63,15 +100,31 @@ export function createAsaasClient(environment, fetchImplementation = fetch) {
     return result;
   }
 
+  // Retry só em leituras (GET): criar/cobrar não é idempotente na Asaas e uma
+  // repetição poderia gerar cobrança dupla. Backoff exponencial com jitter
+  // evita que clientes sincronizados retentem todos no mesmo instante.
+  const RETRY_DELAYS_MS = [400, 1_200];
+  async function requestWithRetry(pathname, options = {}) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await request(pathname, options);
+      } catch (error) {
+        const canRetry = error instanceof AsaasApiError && error.retryable && attempt < RETRY_DELAYS_MS.length;
+        if (!canRetry) throw error;
+        await sleep(RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 200));
+      }
+    }
+  }
+
   return Object.freeze({
-    verifyCredentials: () => request("/myAccount/accountNumber", { timeoutMs: 15_000 }),
-    findCustomersByDocument: (cpfCnpj) => request(`/customers?cpfCnpj=${encodeURIComponent(cpfCnpj)}&limit=1`),
+    verifyCredentials: () => requestWithRetry("/myAccount/accountNumber", { timeoutMs: 15_000 }),
+    findCustomersByDocument: (cpfCnpj) => requestWithRetry(`/customers?cpfCnpj=${encodeURIComponent(cpfCnpj)}&limit=1`),
     createCustomer: (payload) => request("/customers", { method: "POST", body: payload }),
     createPayment: (payload) => request("/payments", { method: "POST", body: payload }),
     updatePayment: (paymentId, payload) => request(`/payments/${encodeURIComponent(paymentId)}`, { method: "PUT", body: payload }),
-    getPayment: (paymentId) => request(`/payments/${encodeURIComponent(paymentId)}`),
-    getPixQrCode: (paymentId) => request(`/payments/${encodeURIComponent(paymentId)}/pixQrCode`),
-    listInstallmentPayments: (installmentId) => request(
+    getPayment: (paymentId) => requestWithRetry(`/payments/${encodeURIComponent(paymentId)}`),
+    getPixQrCode: (paymentId) => requestWithRetry(`/payments/${encodeURIComponent(paymentId)}/pixQrCode`),
+    listInstallmentPayments: (installmentId) => requestWithRetry(
       `/installments/${encodeURIComponent(installmentId)}/payments?limit=100`,
     ),
   });

@@ -1,5 +1,6 @@
 import mysql from "mysql2/promise";
 import { randomUUID } from "node:crypto";
+import { hardenedPoolOptions } from "./pool-options.js";
 
 const FINAL_PAYMENT_STATUSES = new Set(["refunded", "chargeback"]);
 
@@ -22,6 +23,7 @@ export function createGalaticMySqlStore(databaseUrl) {
     database: decodeURIComponent(url.pathname.replace(/^\//, "")),
     timezone: "Z",
     dateStrings: true,
+    ...hardenedPoolOptions(),
   });
   let ready;
 
@@ -90,6 +92,13 @@ export function createGalaticMySqlStore(databaseUrl) {
           updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
           INDEX galatic_checkout_attempts_order (order_id)
         )`,
+        `CREATE TABLE IF NOT EXISTS galatic_operational_alerts (
+          id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, alert_type VARCHAR(48) NOT NULL,
+          severity VARCHAR(16) NOT NULL DEFAULT 'error', source VARCHAR(48) NOT NULL,
+          summary VARCHAR(255) NOT NULL, context_json JSON NULL,
+          occurred_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          INDEX galatic_alerts_type_time (alert_type, occurred_at)
+        )`,
       ];
       for (const statement of statements) await pool.query(statement);
 
@@ -136,8 +145,17 @@ export function createGalaticMySqlStore(databaseUrl) {
     return ready;
   }
 
+  async function recordOperationalAlert(value) {
+    await ensureSchema();
+    await pool.query(
+      "INSERT INTO galatic_operational_alerts (alert_type,severity,source,summary,context_json) VALUES (?,?,?,?,?)",
+      [value.type, value.severity ?? "error", value.source ?? "galatic-api", String(value.summary).slice(0, 255), JSON.stringify(value.context ?? {})],
+    );
+  }
+
   return {
     ensureSchema,
+    recordOperationalAlert,
     async createShippingQuotes({ destinationPostcode, items, quotes }) {
       await ensureSchema();
       const connection = await pool.getConnection();
@@ -360,6 +378,28 @@ export function createGalaticMySqlStore(databaseUrl) {
       } finally {
         connection.release();
       }
+    },
+    async updatePaymentInstallmentFromWebhook({ provider, providerOrderId, providerGroupId, installment, eventId }) {
+      await ensureSchema();
+      // A Galatic vende produto físico com Pix à vista; um webhook de parcela
+      // não faz parte do fluxo. Deduplica o evento e confirma o recebimento
+      // (sem tocar em pedidos) para o provedor parar de reenviar, registrando
+      // um alerta operacional em vez de falhar com 500.
+      if (eventId) {
+        const [result] = await pool.query(
+          "INSERT IGNORE INTO galatic_payment_events (event_id,provider,provider_order_id,status) VALUES (?,?,?,?)",
+          [eventId, provider, providerOrderId, installment?.status ?? "unknown"],
+        );
+        if (result.affectedRows === 0) return { duplicate: true };
+      }
+      await recordOperationalAlert({
+        type: "unexpected_installment_webhook",
+        severity: "warning",
+        source: "asaas-webhook",
+        summary: "Webhook de parcela recebido para um pedido Galatic (Pix à vista).",
+        context: { providerOrderId, providerGroupId },
+      });
+      return { duplicate: false };
     },
     async close() { await pool.end(); },
   };

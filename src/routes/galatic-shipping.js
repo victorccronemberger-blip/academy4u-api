@@ -21,19 +21,20 @@ async function viaCep(postalCode) {
   if (!response.ok || !address || address.erro) throw new ShippingInputError("CEP não encontrado.");
   return { postalCode, street: clean(address.logradouro) || "Endereço informado no checkout", district: clean(address.bairro) || "Centro", city: clean(address.localidade), state: clean(address.uf, 2).toUpperCase() };
 }
-function destination(input, fallback) {
+function destination(input, fallback, origin) {
   if (!input || typeof input !== "object") return fallback;
   const postalCode = digits(input.postalCode ?? input.postal_code ?? input.cep);
   return { postalCode, street: clean(input.street ?? input.logradouro) || fallback.street,
     number: clean(input.number ?? input.numero, 20) || "S/N", complement: clean(input.complement ?? input.complemento),
     district: clean(input.district ?? input.bairro) || fallback.district, city: clean(input.city ?? input.cidade) || fallback.city,
     state: clean(input.state ?? input.uf, 2).toUpperCase() || fallback.state, name: clean(input.recipient_name ?? input.name) || "Cliente Galatic",
-    phone: digits(input.phone) || "15997671749", document: digits(input.federal_tax_id ?? input.document) || "67956916000190",
-    email: clean(input.email) || "comercial@galatic.com.br" };
+    phone: digits(input.phone) || origin.phone, document: digits(input.federal_tax_id ?? input.document) || origin.taxId,
+    email: clean(input.email) || origin.email };
 }
-async function enviaRates(apiKey, packages, to) {
-  const payload = { origin: { name: "Galatic Games", company: "Galatic Games", email: "comercial@galatic.com.br", phone: "15997671749",
-    street: "Avenida Franz Voegeli", number: "501", district: "Parque Continental", city: "Osasco", state: "SP", country: "BR", postalCode: "06020190", identificationNumber: "67956916000190" },
+async function enviaRates(apiKey, packages, to, origin) {
+  const payload = { origin: { name: origin.name, company: origin.name, email: origin.email, phone: origin.phone,
+    street: origin.street, number: origin.number, district: origin.district, city: origin.city, state: origin.state, country: "BR",
+    postalCode: origin.postalCode, identificationNumber: origin.taxId },
     destination: { name: to.name, email: to.email, phone: to.phone, street: to.street, number: to.number || "S/N", district: to.district,
       city: to.city, state: to.state, country: "BR", postalCode: to.postalCode, identificationNumber: to.document }, packages,
     shipment: { carrier: "correios" } };
@@ -46,7 +47,7 @@ async function enviaRates(apiKey, packages, to) {
 export function createGalaticShippingRouter(express, { environment, store }) {
   const router = express.Router(); const limiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 20, prefix: "galatic-shipping" });
   router.post("/", limiter, async (request, response) => {
-    if (!environment.galaticEnviaApiKey) return response.status(503).json({ error: "shipping_unavailable", message: "Cotação temporariamente indisponível." });
+    if (!environment.galaticEnviaApiKey || !environment.galaticShippingOrigin) return response.status(503).json({ error: "shipping_unavailable", message: "Cotação temporariamente indisponível." });
     try {
       const requested = cartItems(request.body?.items); const postalCode = digits(request.body?.postalCode ?? request.body?.destination?.postalCode ?? request.body?.destination?.postal_code ?? request.body?.destination?.cep);
       if (postalCode.length !== 8) throw new ShippingInputError("Informe um CEP válido.");
@@ -58,11 +59,11 @@ export function createGalaticShippingRouter(express, { environment, store }) {
         if (item.product.manageStock && (!Number.isInteger(item.product.stockQuantity) || item.product.stockQuantity < item.quantity)) throw new ShippingInputError(`Estoque insuficiente para ${item.product.title}.`, 409);
         if (!item.product.weightGrams || !item.product.lengthCm || !item.product.widthCm || !item.product.heightCm) throw new ShippingInputError(`Frete indisponível para ${item.product.title}: peso ou dimensões ainda não cadastrados.`, 409);
       }
-      const base = await viaCep(postalCode); const to = destination(request.body?.destination, base);
+      const base = await viaCep(postalCode); const to = destination(request.body?.destination, base, environment.galaticShippingOrigin);
       const packages = normalized.map((item) => ({ type: "box", content: item.product.title.slice(0, 80), amount: item.quantity,
         declaredValue: item.product.unitAmountCents / 100, weight: item.product.weightGrams / 1000, weightUnit: "KG", lengthUnit: "CM",
         dimensions: { length: item.product.lengthCm, width: item.product.widthCm, height: item.product.heightCm } }));
-      const rates = (await enviaRates(environment.galaticEnviaApiKey, packages, to)).map((rate) => ({
+      const rates = (await enviaRates(environment.galaticEnviaApiKey, packages, to, environment.galaticShippingOrigin)).map((rate) => ({
         carrier: clean(rate.carrierDescription ?? "Correios", 60), serviceName: clean(rate.serviceDescription ?? rate.service ?? "Entrega", 100),
         serviceCode: clean(`correios:${rate.service ?? rate.serviceDescription ?? "entrega"}`, 80).replace(/[^A-Za-z0-9_.:-]/g, "_"),
         amountCents: Math.round(Number(rate.totalPrice) * 100), deliveryDays: Math.max(0, Number(rate.deliveryDate?.dateDifference ?? 0)),
