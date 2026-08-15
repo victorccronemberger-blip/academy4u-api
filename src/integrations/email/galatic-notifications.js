@@ -9,7 +9,7 @@ const shippingLabels = { label_created: "Etiqueta de envio criada", posted: "Ped
   out_for_delivery: "Pedido saiu para entrega", delivered: "Pedido entregue",
   delivery_exception: "Ocorrência na entrega", returned: "Pedido devolvido", shipment_canceled: "Envio cancelado" };
 
-function configuration(source) {
+function smtpConfiguration(source) {
   const host = source.GALATIC_SMTP_HOST?.trim() || source.SMTP_HOST?.trim();
   const user = source.GALATIC_SMTP_USER?.trim() || source.SMTP_USER?.trim();
   const password = source.GALATIC_SMTP_PASSWORD?.trim() || source.SMTP_PASSWORD?.trim();
@@ -19,6 +19,33 @@ function configuration(source) {
   return { host, port: Number.isSafeInteger(port) ? port : 465,
     secure: String(source.GALATIC_SMTP_SECURE ?? "true").toLowerCase() === "true",
     auth: { user, pass: password }, from, name: source.GALATIC_MAIL_FROM_NAME?.trim() || "Galatic" };
+}
+
+function hostingerConfiguration(source) {
+  const token = source.GALATIC_MAIL_API_TOKEN?.trim();
+  const mailboxResourceId = source.GALATIC_MAIL_API_MAILBOX_ID?.trim();
+  if (!token || !mailboxResourceId) return null;
+  const apiOrigin = (source.GALATIC_MAIL_API_ORIGIN?.trim() || "https://api.mail.hostinger.com").replace(/\/$/, "");
+  return { token, mailboxResourceId, apiOrigin, name: source.GALATIC_MAIL_FROM_NAME?.trim() || "Galatic" };
+}
+
+async function hostingerRequest(config, path, options = {}) {
+  const response = await fetch(`${config.apiOrigin}${path}`, {
+    ...options,
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${config.token}`,
+      ...(options.body ? { "content-type": "application/json" } : {}),
+      ...options.headers,
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Hostinger Mail API ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`);
+  }
+  if (response.status === 204) return null;
+  return response.json();
 }
 
 function document(title, preview, body, action = null) {
@@ -36,16 +63,32 @@ function document(title, preview, body, action = null) {
 }
 
 export function createGalaticNotifications(source = process.env) {
-  const config = configuration(source);
-  if (!config) return null;
-  const transporter = nodemailer.createTransport({ host: config.host, port: config.port, secure: config.secure,
-    auth: config.auth, disableFileAccess: true, disableUrlAccess: true });
-  const from = `"${config.name.replace(/[\r\n"]/g, "")}" <${config.from}>`;
+  const hostinger = hostingerConfiguration(source);
+  const smtp = smtpConfiguration(source);
+  if (!hostinger && !smtp) return null;
+  const transporter = smtp ? nodemailer.createTransport({ host: smtp.host, port: smtp.port, secure: smtp.secure,
+    auth: smtp.auth, disableFileAccess: true, disableUrlAccess: true }) : null;
+  const from = smtp ? `"${smtp.name.replace(/[\r\n"]/g, "")}" <${smtp.from}>` : null;
   const origin = source.GALATIC_PUBLIC_ORIGIN?.trim() || "https://galatic.com.br";
-  const send = (to, subject, html) => transporter.sendMail({ from, to, subject, html, text: subject });
+  const send = hostinger
+    ? (to, subject, html) => hostingerRequest(hostinger,
+      `/api/v1/mailboxes/${encodeURIComponent(hostinger.mailboxResourceId)}/send`, {
+        method: "POST",
+        body: JSON.stringify({ to: [to], subject, html, text: subject, displayName: hostinger.name }),
+      })
+    : (to, subject, html) => transporter.sendMail({ from, to, subject, html, text: subject });
   return Object.freeze({
     ready: true,
-    verify: () => transporter.verify(),
+    provider: hostinger ? "hostinger-mail-api" : "smtp",
+    verify: async () => {
+      if (!hostinger) return transporter.verify();
+      const account = await hostingerRequest(hostinger, "/api/v1/me");
+      const mailboxes = account?.data?.mailboxes ?? [];
+      if (!mailboxes.some((mailbox) => mailbox.resourceId === hostinger.mailboxResourceId)) {
+        throw new Error("A caixa configurada não pertence ao token da Hostinger Mail API.");
+      }
+      return true;
+    },
     sendEmailVerification({ customer, token }) {
       const url = `${origin}/confirmar-email/?token=${encodeURIComponent(token)}`;
       return send(customer.email, "Confirme sua conta Galatic", document("Confirme sua conta", `Olá, ${customer.first_name}. Falta só confirmar seu e-mail.`,

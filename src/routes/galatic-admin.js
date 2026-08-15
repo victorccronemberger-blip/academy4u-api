@@ -290,7 +290,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       service: `Expiração Pix ${environment.galaticPixReservationMinutes} min · cartão ${environment.galaticCardReservationMinutes} min` },
     envia: { configured: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin), mode: environment.galaticEnviaEnvironment,
       webhook: Boolean(environment.galaticEnviaWebhookSecret || environment.galaticEnviaWebhookToken), service: "Envia" },
-    mail: { configured: Boolean(notifications?.ready), service: "SMTP Galatic" },
+    mail: { configured: Boolean(notifications?.ready), service: notifications?.provider === "hostinger-mail-api" ? "Hostinger Mail API" : "SMTP Galatic" },
   } }));
   router.get("/readiness", async (_request, response) => {
     const products = await store.adminListProducts();
@@ -323,24 +323,24 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       error: row.error_message, resendable: false })) });
   });
   router.post("/emails/preview", (request, response) => {
-    if (!notifications?.ready) return response.status(503).json({ error: "email_unavailable", message: "Configure o SMTP Galatic para visualizar e enviar mensagens." });
+    if (!notifications?.ready) return response.status(503).json({ error: "email_unavailable", message: "Configure o e-mail transacional da Galatic para visualizar e enviar mensagens." });
     const subject = clean(request.body?.subject, 160); const message = clean(request.body?.message, 5000);
     if (!subject || !message) return response.status(400).json({ error: "invalid_email_message" });
     return response.json({ preview: { html: notifications.previewCustom({ subject, message }) } });
   });
   router.post("/emails/send", async (request, response) => {
-    if (!notifications?.ready) return response.status(503).json({ error: "email_unavailable", message: "Configure o SMTP Galatic antes de enviar." });
+    if (!notifications?.ready) return response.status(503).json({ error: "email_unavailable", message: "Configure o e-mail transacional da Galatic antes de enviar." });
     let recipient; try { recipient = normalizeEmail(request.body?.recipient); } catch { return response.status(400).json({ error: "invalid_recipient" }); }
     const subject = clean(request.body?.subject, 160); const message = clean(request.body?.message, 5000); const template = clean(request.body?.template, 48) || "general";
     if (!subject || !message) return response.status(400).json({ error: "invalid_email_message" });
     const id = await store.adminCreateEmail({ recipient, subject, template, message });
     try { await notifications.sendCustom({ recipient, subject, message }); await store.adminFinishEmail(id, "sent"); return response.status(201).json({ id, status: "sent" }); }
-    catch (error) { await store.adminFinishEmail(id, "failed", clean(error?.message, 500)); return response.status(502).json({ error: "email_send_failed", message: "O SMTP não conseguiu enviar a mensagem." }); }
+    catch (error) { await store.adminFinishEmail(id, "failed", clean(error?.message, 500)); return response.status(502).json({ error: "email_send_failed", message: "O provedor de e-mail não conseguiu enviar a mensagem." }); }
   });
   router.get("/integrations/mail/templates/audit", (_request, response) => response.json({ ready: Boolean(notifications?.ready), templates: emailTemplates.map((item) => item.key) }));
   router.post("/integrations/mail/test", async (request, response) => {
     if (!notifications?.ready) return response.status(503).json({ error: "email_unavailable" });
-    await notifications.sendCustom({ recipient: request.galaticAdmin.email, subject: "Teste operacional Galatic", message: "O SMTP transacional da Galatic está funcionando." });
+    await notifications.sendCustom({ recipient: request.galaticAdmin.email, subject: "Teste operacional Galatic", message: "O e-mail transacional da Galatic está funcionando." });
     return response.json({ sent: true });
   });
   return router;
