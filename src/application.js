@@ -256,7 +256,12 @@ export function createApp(overrides = {}, dependencies = {}) {
     const platforms = Object.fromEntries([...contexts].map(([id, context]) => [id, {
       database: context.readiness.status,
       checkout: context.readiness.status === "ready" && environment.checkoutEnabled,
-      ...(id === "galatic" ? { transactionalEmail: Boolean(galaticNotifications?.ready) } : {}),
+      ...(id === "galatic" ? {
+        transactionalEmail: Boolean(galaticNotifications?.ready),
+        shipping: Boolean(context.environment.galaticEnviaApiKey && context.environment.galaticShippingOrigin),
+        shippingProvider: context.environment.galaticEnviaApiKey ? "envia" : null,
+        shippingOrigin: Boolean(context.environment.galaticShippingOrigin),
+      } : {}),
     }]));
     const available = Object.values(platforms).every((platform) => platform.database === "ready");
     response.status(available ? 200 : 503).json({
