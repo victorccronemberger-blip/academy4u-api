@@ -73,6 +73,9 @@ Para incluir `galatic` em `PAYMENT_TENANTS`:
 1. `GALATIC_PUBLIC_ORIGIN=https://galatic.com.br` e `GALATIC_MYSQL_URL`
    apontando para o banco remoto da loja;
 2. `GALATIC_ENVIA_API_KEY` para a cotação de frete;
+   use também `GALATIC_ENVIA_ENVIRONMENT=sandbox` durante a homologação e
+   `GALATIC_ENVIA_WEBHOOK_SECRET` (ou `GALATIC_ENVIA_WEBHOOK_TOKEN`) para
+   autenticar e deduplicar atualizações de rastreio;
 3. conjunto completo `GALATIC_SHIPPING_*` (remetente/origem das cotações —
    sem ele a rota de frete falha fechada com 503);
 4. testes sandbox de Pix para cada plataforma;

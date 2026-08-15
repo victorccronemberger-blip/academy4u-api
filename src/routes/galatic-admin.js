@@ -55,7 +55,7 @@ function couponInput(body) {
   return { description: clean(body?.description), type, value, minimum, limit, perCustomer, active: body?.active === undefined || enabled(body.active) };
 }
 
-export function createGalaticAdminRouter(express, { environment, store, notifications = null }) {
+export function createGalaticAdminRouter(express, { environment, store, notifications = null, fulfillment = null }) {
   const router = express.Router();
   const authLimiter = createFixedWindowLimiter({ limit: 10, windowMs: 60_000, prefix: "galatic-admin-auth" });
 
@@ -151,6 +151,25 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     const updated = await store.adminUpdateShipping(request.params.id, { status, description: clean(request.body?.description, 500) });
     return updated ? response.json({ updated: true, status }) : response.status(409).json({ error: "order_not_paid" });
   });
+  router.post("/orders/:id/shipping/label", async (request, response) => {
+    if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
+    try { const result = await fulfillment.createLabel(request.params.id); return response.status(result.created ? 201 : 200).json(result); }
+    catch (error) {
+      const status = error?.code === "order_not_found" ? 404 : ["order_not_paid", "shipping_service_missing"].includes(error?.code) ? 409
+        : error?.code === "shipping_unavailable" ? 503 : 502;
+      return response.status(status).json({ error: error?.code ?? "label_generation_failed", message: "Não foi possível gerar a etiqueta de envio." });
+    }
+  });
+  router.post("/orders/:id/shipping/refresh", async (request, response) => {
+    if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
+    try { return response.json({ shipment: await fulfillment.refresh(request.params.id) }); }
+    catch (error) { return response.status(error?.code === "shipment_not_found" ? 404 : 502).json({ error: error?.code ?? "tracking_failed" }); }
+  });
+  router.post("/orders/:id/shipping/cancel", async (request, response) => {
+    if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
+    try { return response.json(await fulfillment.cancel(request.params.id)); }
+    catch (error) { return response.status(error?.code === "shipment_not_found" ? 404 : 502).json({ error: error?.code ?? "shipment_cancel_failed" }); }
+  });
 
   router.get("/customers", async (_request, response) => response.json({ customers: await store.adminListCustomers() }));
   router.get("/customers/:id", async (request, response) => { const result = await store.adminCustomer(request.params.id); return result ? response.json(result) : response.status(404).json({ error: "customer_not_found" }); });
@@ -202,7 +221,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   router.get("/integrations", (_request, response) => response.json({ integrations: {
     database: { configured: true, service: "MySQL Galatic isolado" },
     asaas: { configured: Boolean(environment.checkoutEnabled), mode: environment.asaasEnvironment, service: "Pix e cartão" },
-    correios: { configured: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin), service: "Envia" },
+    envia: { configured: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin), mode: environment.galaticEnviaEnvironment,
+      webhook: Boolean(environment.galaticEnviaWebhookSecret || environment.galaticEnviaWebhookToken), service: "Envia" },
     mail: { configured: Boolean(notifications?.ready), service: "SMTP Galatic" },
   } }));
   router.get("/readiness", async (_request, response) => {
@@ -215,6 +235,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       { key: "database", label: "Banco Galatic isolado", required: true, passed: true },
       { key: "checkout", label: "Asaas sandbox/produção configurado", required: true, passed: Boolean(environment.checkoutEnabled) },
       { key: "shipping", label: "Envia e origem de postagem", required: true, passed: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin) },
+      { key: "shipping_webhook", label: "Webhook autenticado de rastreio Envia", required: true,
+        passed: Boolean(environment.galaticEnviaWebhookSecret || environment.galaticEnviaWebhookToken) },
       { key: "catalog", label: "Catálogo com logística completa", required: true, passed: catalog.active_products > 0 && catalog.missing_weight === 0 && catalog.missing_dimensions === 0 },
       { key: "email", label: "E-mail transacional", required: true, passed: Boolean(notifications?.ready) },
     ];

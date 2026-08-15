@@ -198,6 +198,22 @@ export function createGalaticMySqlStore(databaseUrl) {
           INDEX galatic_tracking_order_time (order_id,created_at),
           CONSTRAINT galatic_tracking_order_fk FOREIGN KEY (order_id) REFERENCES galatic_orders(id) ON DELETE CASCADE
         )`,
+        `CREATE TABLE IF NOT EXISTS galatic_shipments (
+          id CHAR(36) PRIMARY KEY, order_id CHAR(36) NOT NULL UNIQUE,
+          provider VARCHAR(24) NOT NULL DEFAULT 'envia', provider_shipment_id VARCHAR(100) NULL UNIQUE,
+          carrier VARCHAR(60) NOT NULL, service VARCHAR(100) NOT NULL,
+          tracking_code VARCHAR(100) NOT NULL UNIQUE, label_url VARCHAR(1500) NULL, track_url VARCHAR(1500) NULL,
+          provider_cost_cents INT UNSIGNED NULL, currency CHAR(3) NOT NULL DEFAULT 'BRL', status VARCHAR(32) NOT NULL DEFAULT 'label_created',
+          canceled_at DATETIME(3) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+          INDEX galatic_shipments_status (status,updated_at),
+          CONSTRAINT galatic_shipments_order_fk FOREIGN KEY (order_id) REFERENCES galatic_orders(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_shipping_webhook_events (
+          event_id VARCHAR(160) PRIMARY KEY, tracking_code VARCHAR(100) NULL,
+          event_type VARCHAR(80) NOT NULL, received_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          INDEX galatic_shipping_webhook_tracking (tracking_code,received_at)
+        )`,
         `CREATE TABLE IF NOT EXISTS galatic_admin_emails (
           id CHAR(36) PRIMARY KEY, recipient VARCHAR(160) NOT NULL, subject VARCHAR(160) NOT NULL,
           template_key VARCHAR(48) NOT NULL, message TEXT NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'pending',
@@ -728,6 +744,7 @@ export function createGalaticMySqlStore(databaseUrl) {
       const [items] = await pool.query(
         "SELECT sku,title name,quantity,total_amount_cents total FROM galatic_order_items WHERE order_id=? ORDER BY id", [orderId],
       );
+      const [tracking] = await pool.query("SELECT status,tracking_code,description,created_at FROM galatic_tracking_events WHERE order_id=? ORDER BY created_at", [orderId]);
       return { order: {
         order_number: order.id, created_at: order.created_at, paid_at: order.paid_at,
         payment_status: order.payment_status, payment_method: order.payment_method, installments: Number(order.installments),
@@ -735,7 +752,7 @@ export function createGalaticMySqlStore(databaseUrl) {
         shipping_address: typeof order.shipping_address_json === "string" ? JSON.parse(order.shipping_address_json) : order.shipping_address_json,
         subtotal: Number(order.subtotal_cents), shipping_amount: Number(order.shipping_cents),
         discount_amount: Number(order.discount_cents), payment_fee_amount: Number(order.payment_fee_cents), total: Number(order.total_cents), currency: "BRL",
-      }, items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })), tracking: [] };
+      }, items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })), tracking };
     },
     async lookupOrder(orderId, email) {
       await ensureSchema();
@@ -745,6 +762,11 @@ export function createGalaticMySqlStore(databaseUrl) {
          FROM galatic_orders WHERE id=? AND buyer_email=?`, [orderId, email],
       );
       return row ? { ...row, total: Number(row.total), shipping_amount: Number(row.shipping_amount), shipping_service_name: "Entrega Galatic" } : null;
+    },
+    async trackingForOrder(orderId) {
+      await ensureSchema();
+      const [rows] = await pool.query("SELECT status,tracking_code,description,created_at FROM galatic_tracking_events WHERE order_id=? ORDER BY created_at", [orderId]);
+      return rows;
     },
     async listCustomerAddresses(customerId) {
       await ensureSchema();
@@ -944,8 +966,12 @@ export function createGalaticMySqlStore(databaseUrl) {
       const [tracking] = await pool.query(
         `SELECT status,tracking_code,description,created_at FROM galatic_tracking_events WHERE order_id=? ORDER BY created_at`, [orderId],
       );
+      const [shipments] = await pool.query(
+        `SELECT provider,carrier,service,tracking_code,label_url,track_url,status,created_at,updated_at,canceled_at
+           FROM galatic_shipments WHERE order_id=? ORDER BY created_at`, [orderId],
+      );
       return { order: { ...order, total: Number(order.total), shipping_service_name: "Entrega via Envia" },
-        items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })), shipments: tracking };
+        items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })), shipments, tracking };
     },
     async adminUpdateShipping(orderId, { status, trackingCode = null, description = null }) {
       await ensureSchema();
@@ -956,6 +982,82 @@ export function createGalaticMySqlStore(databaseUrl) {
       if (!result.affectedRows) return false;
       await pool.query("INSERT INTO galatic_tracking_events (order_id,status,tracking_code,description) VALUES (?,?,?,?)",
         [orderId, status, trackingCode, description]);
+      return true;
+    },
+    async shipmentCreationContext(orderId) {
+      await ensureSchema();
+      const [[order]] = await pool.query(
+        `SELECT o.id,o.payment_status,o.fulfillment_status,o.buyer_name,o.buyer_email,o.buyer_phone,o.buyer_document,
+                o.shipping_address_json,q.service_code,q.service_name
+           FROM galatic_orders o LEFT JOIN galatic_shipping_quotes q ON q.id=o.shipping_quote_id WHERE o.id=?`, [orderId],
+      );
+      if (!order) return null;
+      const [items] = await pool.query(
+        `SELECT i.sku,i.title,i.quantity,i.unit_amount_cents,p.weight_grams,p.length_cm,p.width_cm,p.height_cm
+           FROM galatic_order_items i JOIN galatic_products p ON p.sku=i.sku WHERE i.order_id=? ORDER BY i.id`, [orderId],
+      );
+      return { ...order, shipping_address: typeof order.shipping_address_json === "string" ? JSON.parse(order.shipping_address_json) : order.shipping_address_json,
+        items: items.map((item) => ({ ...item, quantity: Number(item.quantity), unit_amount_cents: Number(item.unit_amount_cents),
+          weight_grams: Number(item.weight_grams), length_cm: Number(item.length_cm), width_cm: Number(item.width_cm), height_cm: Number(item.height_cm) })) };
+    },
+    async shipmentForOrder(orderId) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT id,order_id,provider,provider_shipment_id,carrier,service,tracking_code,label_url,track_url,
+                provider_cost_cents,currency,status,canceled_at,created_at,updated_at FROM galatic_shipments WHERE order_id=?`, [orderId],
+      );
+      return row ? { ...row, provider_cost_cents: row.provider_cost_cents === null ? null : Number(row.provider_cost_cents) } : null;
+    },
+    async saveShipment(orderId, shipment) {
+      await ensureSchema();
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [[existing]] = await connection.query("SELECT id FROM galatic_shipments WHERE order_id=? FOR UPDATE", [orderId]);
+        if (existing) { await connection.rollback(); return this.shipmentForOrder(orderId); }
+        const id = randomUUID();
+        await connection.query(
+          `INSERT INTO galatic_shipments
+             (id,order_id,provider_shipment_id,carrier,service,tracking_code,label_url,track_url,provider_cost_cents,currency,status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, orderId, shipment.providerShipmentId, shipment.carrier, shipment.service, shipment.trackingCode,
+            shipment.labelUrl, shipment.trackUrl, shipment.costCents, shipment.currency, "label_created"],
+        );
+        await connection.query("UPDATE galatic_orders SET fulfillment_status='label_created',tracking_code=? WHERE id=? AND payment_status='paid'", [shipment.trackingCode, orderId]);
+        await connection.query("INSERT INTO galatic_tracking_events (order_id,status,tracking_code,description) VALUES (?,?,?,?)",
+          [orderId, "label_created", shipment.trackingCode, "Etiqueta de envio gerada."]);
+        await connection.commit();
+        return this.shipmentForOrder(orderId);
+      } catch (error) { await connection.rollback(); throw error; }
+      finally { connection.release(); }
+    },
+    async updateShipmentFromEvent({ eventId, eventType, trackingCode, status, description }) {
+      await ensureSchema();
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [dedupe] = await connection.query(
+          "INSERT IGNORE INTO galatic_shipping_webhook_events (event_id,tracking_code,event_type) VALUES (?,?,?)",
+          [eventId, trackingCode || null, eventType],
+        );
+        if (!dedupe.affectedRows) { await connection.rollback(); return { duplicate: true }; }
+        const [[shipment]] = await connection.query("SELECT order_id FROM galatic_shipments WHERE tracking_code=? FOR UPDATE", [trackingCode]);
+        if (!shipment) { await connection.commit(); return { ignored: true }; }
+        await connection.query("UPDATE galatic_shipments SET status=? WHERE tracking_code=?", [status, trackingCode]);
+        await connection.query("UPDATE galatic_orders SET fulfillment_status=? WHERE id=?", [status, shipment.order_id]);
+        await connection.query("INSERT INTO galatic_tracking_events (order_id,status,tracking_code,description) VALUES (?,?,?,?)",
+          [shipment.order_id, status, trackingCode, description || null]);
+        await connection.commit();
+        return { updated: true, orderId: shipment.order_id };
+      } catch (error) { await connection.rollback(); throw error; }
+      finally { connection.release(); }
+    },
+    async cancelShipment(orderId, description = "Etiqueta cancelada.") {
+      await ensureSchema();
+      const [result] = await pool.query("UPDATE galatic_shipments SET status='canceled',canceled_at=NOW(3) WHERE order_id=? AND canceled_at IS NULL", [orderId]);
+      if (!result.affectedRows) return false;
+      await pool.query("UPDATE galatic_orders SET fulfillment_status='shipment_canceled' WHERE id=?", [orderId]);
+      await pool.query("INSERT INTO galatic_tracking_events (order_id,status,tracking_code,description) SELECT order_id,'shipment_canceled',tracking_code,? FROM galatic_shipments WHERE order_id=?", [description, orderId]);
       return true;
     },
     async adminListCustomers() {

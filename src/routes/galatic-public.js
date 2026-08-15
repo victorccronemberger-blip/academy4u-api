@@ -41,7 +41,7 @@ export function createGalaticPublicRouter(express, { store }) {
       const email = normalizeEmail(request.body?.email); const orderId = clean(request.body?.order_number, 36);
       if (!/^[0-9a-f-]{36}$/i.test(orderId)) throw new Error("Informe um pedido válido.");
       const order = await store.lookupOrder(orderId, email);
-      return order ? response.json({ order, tracking: [] }) : response.status(404).json({ error: "order_not_found", message: "Pedido não encontrado para este e-mail." });
+      return order ? response.json({ order, tracking: await store.trackingForOrder(orderId) }) : response.status(404).json({ error: "order_not_found", message: "Pedido não encontrado para este e-mail." });
     } catch (error) { return response.status(400).json({ error: "invalid_order_lookup", message: error.message }); }
   });
   return router;

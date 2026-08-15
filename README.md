@@ -31,6 +31,12 @@ infraestrutura da Academy permanece no escopo de conformidade PCI DSS.
 | `GET` | `/v1/checkout/orders/:id/installments` | Plano Pix parcelado sem links externos |
 | `GET` | `/v1/checkout/orders/:id/installments/:n/pix` | QR Code de uma parcela |
 | `POST` | `/v1/webhooks/asaas` | Webhook autenticado e idempotente |
+| `POST` | `/v1/galatic/quote` | Cotação Envia com preço e logística autoritativos |
+| `GET` | `/v1/galatic/shipping/status` | Estado público do frete (sem segredos) |
+| `POST` | `/v1/galatic/admin/orders/:id/shipping/label` | Gera uma única etiqueta Envia para pedido pago |
+| `POST` | `/v1/galatic/admin/orders/:id/shipping/refresh` | Reconcilia rastreio sob demanda |
+| `POST` | `/v1/galatic/admin/orders/:id/shipping/cancel` | Cancela etiqueta ainda elegível |
+| `POST` | `/v1/webhooks/envia` | Webhook de rastreio autenticado e deduplicado |
 | `GET` | `/v1/public/products` | Catálogo comercial ativo |
 | `POST` | `/v1/public/quote` | Cotação do catálogo comercial |
 

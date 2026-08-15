@@ -18,6 +18,14 @@ function parseAsaasEnvironment(value) {
   return environment;
 }
 
+function parseEnviaEnvironment(value) {
+  const environment = String(value ?? "sandbox").trim().toLowerCase();
+  if (!['sandbox', 'production'].includes(environment)) {
+    throw new Error("GALATIC_ENVIA_ENVIRONMENT must be sandbox or production.");
+  }
+  return environment;
+}
+
 function parseAsaasApiKey(value) {
   const transported = String(value ?? "").trim();
   const key = transported.startsWith("\\$aact_") ? transported.slice(1) : transported;
@@ -67,6 +75,7 @@ export function getEnvironment(source = process.env) {
   const asaasRequested = parseBoolean(source.ASAAS_ENABLED ?? "false");
   const asaasAvailable = Boolean(asaasApiKey);
 
+  const galaticEnviaEnvironment = parseEnviaEnvironment(source.GALATIC_ENVIA_ENVIRONMENT);
   return {
     nodeEnvironment: source.NODE_ENV?.trim().toLowerCase() || "development",
     host: source.HOST?.trim() || "0.0.0.0",
@@ -89,6 +98,15 @@ export function getEnvironment(source = process.env) {
       || null,
     paymentReferencePrefix: "academy",
     galaticEnviaApiKey: source.GALATIC_ENVIA_API_KEY?.trim() || null,
+    galaticEnviaEnvironment,
+    galaticEnviaApiOrigin: galaticEnviaEnvironment === "production"
+      ? "https://api.envia.com"
+      : "https://api-test.envia.com",
+    galaticEnviaQueriesOrigin: galaticEnviaEnvironment === "production"
+      ? "https://queries.envia.com"
+      : "https://queries-test.envia.com",
+    galaticEnviaWebhookSecret: source.GALATIC_ENVIA_WEBHOOK_SECRET?.trim() || null,
+    galaticEnviaWebhookToken: source.GALATIC_ENVIA_WEBHOOK_TOKEN?.trim() || null,
     galaticShippingOrigin: parseGalaticShippingOrigin(source),
     galaticAdminEmail: source.GALATIC_ADMIN_EMAIL?.trim().toLowerCase() || null,
     galaticAdminPassword: source.GALATIC_ADMIN_PASSWORD || null,

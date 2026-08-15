@@ -31,23 +31,23 @@ function destination(input, fallback, origin) {
     phone: digits(input.phone) || origin.phone, document: digits(input.federal_tax_id ?? input.document) || origin.taxId,
     email: clean(input.email) || origin.email };
 }
-async function enviaRates(apiKey, packages, to, origin) {
-  const payload = { origin: { name: origin.name, company: origin.name, email: origin.email, phone: origin.phone,
+export function enviaAddress(origin) {
+  return { name: origin.name, company: origin.name, email: origin.email, phone: origin.phone,
     street: origin.street, number: origin.number, district: origin.district, city: origin.city, state: origin.state, country: "BR",
-    postalCode: origin.postalCode, identificationNumber: origin.taxId },
-    destination: { name: to.name, email: to.email, phone: to.phone, street: to.street, number: to.number || "S/N", district: to.district,
-      city: to.city, state: to.state, country: "BR", postalCode: to.postalCode, identificationNumber: to.document }, packages,
-    shipment: { carrier: "correios" } };
-  const response = await fetch("https://api.envia.com/ship/rate/", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(20_000) });
-  const result = await response.json().catch(() => null);
-  if (!response.ok) throw Object.assign(new Error("envia_quote_failed"), { status: response.status, details: result?.error?.message });
-  return Array.isArray(result?.data) ? result.data : [];
+    postalCode: origin.postalCode, identificationNumber: origin.taxId };
 }
 
-export function createGalaticShippingRouter(express, { environment, store }) {
+export function destinationAddress(to) {
+  return { name: to.name, email: to.email, phone: to.phone, street: to.street, number: to.number || "S/N", district: to.district,
+    city: to.city, state: to.state, country: "BR", postalCode: to.postalCode, identificationNumber: to.document };
+}
+
+export function createGalaticShippingRouter(express, { environment, store, enviaClient }) {
   const router = express.Router(); const limiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 20, prefix: "galatic-shipping" });
+  router.get("/status", (_request, response) => response.json({ enabled: Boolean(enviaClient?.ready && environment.galaticShippingOrigin),
+    provider: "envia", environment: environment.galaticEnviaEnvironment, labels: true, tracking: true }));
   router.post("/", limiter, async (request, response) => {
-    if (!environment.galaticEnviaApiKey || !environment.galaticShippingOrigin) return response.status(503).json({ error: "shipping_unavailable", message: "Cotação temporariamente indisponível." });
+    if (!enviaClient?.ready || !environment.galaticShippingOrigin) return response.status(503).json({ error: "shipping_unavailable", message: "Cotação temporariamente indisponível." });
     try {
       const requested = cartItems(request.body?.items); const postalCode = digits(request.body?.postalCode ?? request.body?.destination?.postalCode ?? request.body?.destination?.postal_code ?? request.body?.destination?.cep);
       if (postalCode.length !== 8) throw new ShippingInputError("Informe um CEP válido.");
@@ -63,11 +63,17 @@ export function createGalaticShippingRouter(express, { environment, store }) {
       const packages = normalized.map((item) => ({ type: "box", content: item.product.title.slice(0, 80), amount: item.quantity,
         declaredValue: item.product.unitAmountCents / 100, weight: item.product.weightGrams / 1000, weightUnit: "KG", lengthUnit: "CM",
         dimensions: { length: item.product.lengthCm, width: item.product.widthCm, height: item.product.heightCm } }));
-      const rates = (await enviaRates(environment.galaticEnviaApiKey, packages, to, environment.galaticShippingOrigin)).map((rate) => ({
-        carrier: clean(rate.carrierDescription ?? "Correios", 60), serviceName: clean(rate.serviceDescription ?? rate.service ?? "Entrega", 100),
-        serviceCode: clean(`correios:${rate.service ?? rate.serviceDescription ?? "entrega"}`, 80).replace(/[^A-Za-z0-9_.:-]/g, "_"),
+      const quotePayload = { origin: enviaAddress(environment.galaticShippingOrigin), destination: destinationAddress(to), packages,
+        shipment: { type: 1, carrier: "correios" }, settings: { currency: "BRL" } };
+      const providerResult = await enviaClient.quote(quotePayload);
+      const rates = (Array.isArray(providerResult?.data) ? providerResult.data : []).map((rate) => {
+        const carrierCode = clean(rate.carrier ?? rate.carrierCode ?? "correios", 30).toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+        const service = clean(rate.service ?? rate.serviceCode ?? rate.serviceDescription ?? "entrega", 40).toLowerCase().replace(/[^a-z0-9_.-]/g, "_");
+        return {
+        carrier: clean(rate.carrierDescription ?? rate.carrier ?? "Correios", 60), serviceName: clean(rate.serviceDescription ?? rate.service ?? "Entrega", 100),
+        serviceCode: `${carrierCode}:${service}`,
         amountCents: Math.round(Number(rate.totalPrice) * 100), deliveryDays: Math.max(0, Number(rate.deliveryDate?.dateDifference ?? 0)),
-      })).filter((rate) => rate.amountCents > 0).sort((a, b) => a.deliveryDays - b.deliveryDays || a.amountCents - b.amountCents).slice(0, 3);
+      }; }).filter((rate) => rate.amountCents > 0).sort((a, b) => a.deliveryDays - b.deliveryDays || a.amountCents - b.amountCents).slice(0, 3);
       if (!rates.length) return response.status(503).json({ error: "shipping_unavailable", message: "Nenhuma entrega disponível para este CEP." });
       const saved = await store.createShippingQuotes({ destinationPostcode: postalCode, items: normalized.map((item) => ({ sku: item.product.sku, quantity: item.quantity })), quotes: rates });
       response.json({ quotes: saved.map((quote) => ({ quote_id: quote.id, carrier: quote.carrier, service: quote.serviceName, amount: quote.amountCents, currency: "brl", estimated_days: quote.deliveryDays })), address: base, provider: "envia", expires_in: 900 });

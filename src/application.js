@@ -9,6 +9,7 @@ import { jsonErrorHandler } from "./http/error-handler.js";
 import { createFixedWindowLimiter } from "./http/fixed-window-limiter.js";
 import { createAsaasClient } from "./integrations/asaas/client.js";
 import { createGalaticNotifications } from "./integrations/email/galatic-notifications.js";
+import { createEnviaClient } from "./integrations/envia/client.js";
 import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
@@ -18,6 +19,8 @@ import { createGalaticShippingRouter } from "./routes/galatic-shipping.js";
 import { createGalaticCustomerRouter } from "./routes/galatic-customer.js";
 import { createGalaticPublicRouter } from "./routes/galatic-public.js";
 import { createGalaticAdminRouter } from "./routes/galatic-admin.js";
+import { createEnviaWebhookHandler } from "./routes/envia-webhook.js";
+import { createGalaticFulfillmentService } from "./services/galatic-fulfillment.js";
 import { createInstallmentService } from "./services/installment-service.js";
 import { createInMemoryStore } from "./store/in-memory-store.js";
 import { createGalaticMySqlStore } from "./store/galatic-mysql-store.js";
@@ -89,6 +92,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   const environment = getEnvironment(source);
   const tenants = assertTenantIsolation(getTenantDefinitions(source, environment));
   const asaasClient = dependencies.asaasClient ?? createAsaasClient(environment);
+  const enviaClient = dependencies.enviaClient ?? createEnviaClient(environment);
   const galaticNotifications = dependencies.galaticNotifications ?? createGalaticNotifications(source);
   const contexts = new Map();
 
@@ -102,6 +106,11 @@ export function createApp(overrides = {}, dependencies = {}) {
       paymentReferencePrefix: tenant.referencePrefix,
       successOrigin: source[`${tenant.variablePrefix}_SUCCESS_ORIGIN`]?.trim() || tenant.publicOrigin,
       galaticEnviaApiKey: environment.galaticEnviaApiKey,
+      galaticEnviaEnvironment: environment.galaticEnviaEnvironment,
+      galaticEnviaApiOrigin: environment.galaticEnviaApiOrigin,
+      galaticEnviaQueriesOrigin: environment.galaticEnviaQueriesOrigin,
+      galaticEnviaWebhookSecret: environment.galaticEnviaWebhookSecret,
+      galaticEnviaWebhookToken: environment.galaticEnviaWebhookToken,
       galaticShippingOrigin: environment.galaticShippingOrigin,
     };
     const injectedStore = dependencies.stores?.[tenant.id]
@@ -236,7 +245,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     allowedHeaders: ["Content-Type", "Accept", "Authorization", "Idempotency-Key", "asaas-access-token", "x-academy-trusted-token"],
     maxAge: 86_400,
   }));
-  app.use(express.json({ limit: "32kb" }));
+  app.use(express.json({ limit: "32kb", verify(request, _response, buffer) { request.rawBody = buffer.toString("utf8"); } }));
 
   app.get("/health", async (_request, response) => {
     await Promise.all([...contexts.values()].map((context) => context.waitForReady()));
@@ -276,6 +285,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   for (const context of contexts.values()) {
     const middleware = [tenantOrigin(context.tenant), tenantReadiness(context)];
     if (context.tenant.id === "galatic") {
+      const fulfillment = createGalaticFulfillmentService({ environment: context.environment, store: context.store, enviaClient });
       app.use("/v1/galatic/checkout", ...middleware, createGalaticCheckoutRouter(express, {
         environment: context.environment,
         asaasClient,
@@ -283,12 +293,15 @@ export function createApp(overrides = {}, dependencies = {}) {
         notifications: galaticNotifications,
       }));
       app.use("/v1/galatic/admin", ...middleware, createGalaticAdminRouter(express, {
-        environment: context.environment, store: context.store, notifications: galaticNotifications,
+        environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment,
       }));
-      app.use("/v1/galatic/quote", ...middleware, createGalaticShippingRouter(express, {
+      const shippingRouter = createGalaticShippingRouter(express, {
         environment: context.environment,
         store: context.store,
-      }));
+        enviaClient,
+      });
+      app.use("/v1/galatic/quote", ...middleware, shippingRouter);
+      app.use("/v1/galatic/shipping", ...middleware, shippingRouter);
       app.use("/v1/galatic", ...middleware, createGalaticCustomerRouter(express, {
         store: context.store,
         notifications: galaticNotifications,
@@ -351,6 +364,9 @@ export function createApp(overrides = {}, dependencies = {}) {
     if (!context) return response.status(400).json({ error: "invalid_webhook" });
     return context.webhookHandler(request, response);
   });
+  const galaticContext = contexts.get("galatic");
+  if (galaticContext) app.post("/v1/webhooks/envia", webhookLimiter,
+    createEnviaWebhookHandler({ environment: galaticContext.environment, store: galaticContext.store }));
 
   app.use((_request, response) => {
     response.status(404).json({

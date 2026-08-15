@@ -133,7 +133,7 @@ test("passes the configured Galatic shipping origin into the tenant router", asy
   const response = await originalFetch(`http://127.0.0.1:${port}/v1/galatic/quote`, { method: "POST",
     headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [{ sku: "DEP001", quantity: 1 }], postalCode: "06020190" }) });
   assert.equal(response.status, 200); assert.equal((await response.json()).quotes[0].amount, 2500);
-  assert.equal(calls.some((call) => call.url.includes("api.envia.com")), true);
+  assert.equal(calls.some((call) => call.url.includes("api-test.envia.com")), true);
 });
 
 test("the real Galatic MySQL store implements the full webhook store interface", async () => {
