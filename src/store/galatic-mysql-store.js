@@ -1056,6 +1056,21 @@ export function createGalaticMySqlStore(databaseUrl) {
         providerGroupId: row.payment_provider_group_id, status: row.payment_status,
         fulfillmentStatus: row.fulfillment_status, stockReleasedAt: row.stock_released_at } : null;
     },
+    async listExpiredPaymentReservations({ pixBefore, cardBefore, limit = 50 }) {
+      await ensureSchema();
+      const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
+      const [rows] = await pool.query(
+        `SELECT id,payment_provider_order_id,payment_provider_group_id,payment_status,payment_method,created_at
+         FROM galatic_orders
+         WHERE stock_released_at IS NULL AND paid_at IS NULL
+           AND payment_status IN ('pending','open','processing','overdue')
+           AND ((payment_method='pix' AND created_at<=?) OR (payment_method='credit_card' AND created_at<=?))
+         ORDER BY created_at ASC LIMIT ?`, [pixBefore, cardBefore, safeLimit],
+      );
+      return rows.map((row) => ({ id: row.id, providerOrderId: row.payment_provider_order_id,
+        providerGroupId: row.payment_provider_group_id, status: row.payment_status,
+        method: row.payment_method, createdAt: row.created_at }));
+    },
     async adminCancelUnpaidOrder(orderId) {
       await ensureSchema();
       const connection = await pool.getConnection();

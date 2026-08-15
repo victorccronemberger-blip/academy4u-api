@@ -10,6 +10,12 @@ function parsePort(value) {
   return port;
 }
 
+function parsePositiveInteger(value, fallback, name) {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer.`);
+  return parsed;
+}
+
 function parseAsaasEnvironment(value) {
   const environment = String(value ?? "sandbox").trim().toLowerCase();
   if (!["sandbox", "production"].includes(environment)) {
@@ -108,6 +114,9 @@ export function getEnvironment(source = process.env) {
     galaticEnviaWebhookSecret: source.GALATIC_ENVIA_WEBHOOK_SECRET?.trim() || null,
     galaticEnviaWebhookToken: source.GALATIC_ENVIA_WEBHOOK_TOKEN?.trim() || null,
     galaticShippingOrigin: parseGalaticShippingOrigin(source),
+    galaticPaymentMaintenanceEnabled: parseBoolean(source.GALATIC_PAYMENT_MAINTENANCE_ENABLED ?? "true"),
+    galaticPixReservationMinutes: parsePositiveInteger(source.GALATIC_PIX_RESERVATION_MINUTES, 60, "GALATIC_PIX_RESERVATION_MINUTES"),
+    galaticCardReservationMinutes: parsePositiveInteger(source.GALATIC_CARD_RESERVATION_MINUTES, 4320, "GALATIC_CARD_RESERVATION_MINUTES"),
     galaticAdminEmail: source.GALATIC_ADMIN_EMAIL?.trim().toLowerCase() || null,
     galaticAdminPassword: source.GALATIC_ADMIN_PASSWORD || null,
     asaasEnvironment,

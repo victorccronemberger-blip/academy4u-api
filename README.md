@@ -36,6 +36,10 @@ infraestrutura da Academy permanece no escopo de conformidade PCI DSS.
 | `POST` | `/v1/galatic/admin/orders/:id/shipping/label` | Gera uma única etiqueta Envia para pedido pago |
 | `POST` | `/v1/galatic/admin/orders/:id/shipping/refresh` | Reconcilia rastreio sob demanda |
 | `POST` | `/v1/galatic/admin/orders/:id/shipping/cancel` | Cancela etiqueta ainda elegível |
+| `POST` | `/v1/galatic/admin/orders/:id/payment/cancel` | Remove cobrança não paga e libera o estoque de forma idempotente |
+| `POST` | `/v1/galatic/admin/orders/:id/payment/refund` | Solicita estorno integral confirmado pelo número do pedido |
+
+Reservas Pix abandonadas são reconciliadas com o Asaas após 60 minutos; cartões em análise usam uma janela conservadora de 72 horas. A cobrança é consultada e removida no provedor antes de o estoque voltar ao catálogo. Os limites podem ser ajustados com `GALATIC_PIX_RESERVATION_MINUTES` e `GALATIC_CARD_RESERVATION_MINUTES`.
 | `POST` | `/v1/webhooks/envia` | Webhook de rastreio autenticado e deduplicado |
 | `GET` | `/v1/public/products` | Catálogo comercial ativo |
 | `POST` | `/v1/public/quote` | Cotação do catálogo comercial |

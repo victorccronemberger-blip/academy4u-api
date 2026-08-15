@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { createApp } from "./application.js";
+import { createGalaticPaymentMaintenance } from "./services/galatic-payment-maintenance.js";
 
-const { app, environment, ready, stores, tenants } = createApp();
+const { app, environment, ready, stores, tenants, asaasClient, contexts } = createApp();
+const galaticContext = contexts.get("galatic");
+const paymentMaintenance = galaticContext ? createGalaticPaymentMaintenance({
+  environment: galaticContext.environment, store: galaticContext.store, asaasClient,
+}) : null;
 const server = app.listen(environment.port, environment.host, () => {
   console.log(`Payments API listening on ${environment.host}:${environment.port}`, {
     tenants: tenants.map((tenant) => tenant.id),
@@ -29,6 +34,7 @@ server.requestTimeout = 75_000;
 ready
   .then(() => {
     console.log("Payments API persistent stores are ready.");
+    paymentMaintenance?.start();
   })
   .catch((error) => {
     console.error("Payments API could not initialize its persistent stores.", {
@@ -45,6 +51,7 @@ let shuttingDown = false;
 function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
+  paymentMaintenance?.stop();
   console.log(`ACADEMY4U API received ${signal}.`);
   // Libera imediatamente as conexões keep-alive ociosas; sem isso o
   // server.close() pode aguardar minutos por sockets que nunca fecham.
