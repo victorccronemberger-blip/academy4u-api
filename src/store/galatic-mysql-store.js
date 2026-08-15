@@ -234,6 +234,7 @@ export function createGalaticMySqlStore(databaseUrl) {
         "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS tracking_code VARCHAR(100) NULL AFTER paid_at",
         "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS coupon_code VARCHAR(40) NULL AFTER discount_cents",
         "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0 AFTER coupon_code",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS stock_released_at DATETIME(3) NULL AFTER paid_at",
         "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS cost_amount_cents INT UNSIGNED NULL AFTER unit_amount_cents",
         "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS source_url VARCHAR(1000) NULL AFTER image_url",
         "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS editorial_status VARCHAR(24) NOT NULL DEFAULT 'draft' AFTER source_url",
@@ -297,6 +298,32 @@ export function createGalaticMySqlStore(databaseUrl) {
       "INSERT INTO galatic_operational_alerts (alert_type,severity,source,summary,context_json) VALUES (?,?,?,?,?)",
       [value.type, value.severity ?? "error", value.source ?? "galatic-api", String(value.summary).slice(0, 255), JSON.stringify(value.context ?? {})],
     );
+  }
+
+  async function releaseReservedStock(connection, orderId) {
+    const [lines] = await connection.query(
+      "SELECT sku,quantity FROM galatic_order_items WHERE order_id=? FOR UPDATE", [orderId],
+    );
+    for (const line of lines) await connection.query(
+      "UPDATE galatic_products SET stock_quantity=stock_quantity+? WHERE sku=? AND manage_stock=1",
+      [line.quantity, line.sku],
+    );
+  }
+
+  async function reclaimReleasedStock(connection, orderId) {
+    const [lines] = await connection.query(
+      `SELECT i.sku,i.quantity,p.manage_stock,p.stock_quantity
+       FROM galatic_order_items i JOIN galatic_products p ON p.sku=i.sku
+       WHERE i.order_id=? FOR UPDATE`, [orderId],
+    );
+    if (lines.some((line) => line.manage_stock && Number(line.stock_quantity) < Number(line.quantity))) return false;
+    for (const line of lines) {
+      if (line.manage_stock) await connection.query(
+        "UPDATE galatic_products SET stock_quantity=stock_quantity-? WHERE sku=?",
+        [line.quantity, line.sku],
+      );
+    }
+    return true;
   }
 
   return {
@@ -481,11 +508,14 @@ export function createGalaticMySqlStore(databaseUrl) {
       const connection = await pool.getConnection();
       try {
         await connection.beginTransaction();
-        const [lines] = await connection.query("SELECT sku,quantity FROM galatic_order_items WHERE order_id=? FOR UPDATE", [orderId]);
-        for (const line of lines) await connection.query(
-          "UPDATE galatic_products SET stock_quantity=stock_quantity+? WHERE sku=? AND manage_stock=1", [line.quantity, line.sku],
+        const [[order]] = await connection.query(
+          "SELECT stock_released_at FROM galatic_orders WHERE id=? FOR UPDATE", [orderId],
         );
-        await connection.query("UPDATE galatic_orders SET payment_status='failed',fulfillment_status='payment_failed' WHERE id=?", [orderId]);
+        if (order && !order.stock_released_at) await releaseReservedStock(connection, orderId);
+        await connection.query(
+          `UPDATE galatic_orders SET payment_status='failed',fulfillment_status='payment_failed',
+           stock_released_at=COALESCE(stock_released_at,UTC_TIMESTAMP(3)) WHERE id=?`, [orderId],
+        );
         await connection.query("DELETE FROM galatic_checkout_attempts WHERE idempotency_key=?", [key]);
         await connection.commit();
       } catch (error) { await connection.rollback(); throw error; } finally { connection.release(); }
@@ -536,7 +566,7 @@ export function createGalaticMySqlStore(databaseUrl) {
           }
         }
         const [[order]] = await connection.query(
-          `SELECT id,payment_status,coupon_code,coupon_redeemed FROM galatic_orders
+          `SELECT id,payment_status,coupon_code,coupon_redeemed,stock_released_at FROM galatic_orders
            WHERE payment_provider=? AND payment_provider_order_id=? FOR UPDATE`,
           [provider, providerOrderId],
         );
@@ -550,14 +580,26 @@ export function createGalaticMySqlStore(databaseUrl) {
           );
         }
         if (order) {
+          if (resolvedStatus === "failed" && previousStatus !== "paid" && !order.stock_released_at) {
+            await releaseReservedStock(connection, order.id);
+            order.stock_released_at = "released";
+          }
+          let fulfillmentStatus = null;
+          if (resolvedStatus === "paid" && order.stock_released_at) {
+            fulfillmentStatus = await reclaimReleasedStock(connection, order.id) ? "paid" : "manual_stock_review";
+          }
           await connection.query(
             `UPDATE galatic_orders SET payment_status=?,paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at,UTC_TIMESTAMP(3)) ELSE paid_at END,
+             stock_released_at=CASE WHEN ?='paid' AND ?='paid' THEN NULL WHEN ?='failed' THEN COALESCE(stock_released_at,UTC_TIMESTAMP(3)) ELSE stock_released_at END,
              fulfillment_status=CASE
+               WHEN ? IS NOT NULL THEN ?
                WHEN ?='paid' AND fulfillment_status='awaiting_payment' THEN 'paid'
+               WHEN ?='failed' AND fulfillment_status='awaiting_payment' THEN 'payment_failed'
                WHEN ? IN ('refunded','chargeback') THEN 'payment_reversed'
                ELSE fulfillment_status END
              WHERE id=?`,
-            [resolvedStatus, resolvedStatus, resolvedStatus, resolvedStatus, order.id],
+            [resolvedStatus, resolvedStatus, resolvedStatus, fulfillmentStatus, resolvedStatus,
+              fulfillmentStatus, fulfillmentStatus, resolvedStatus, resolvedStatus, resolvedStatus, order.id],
           );
           if (resolvedStatus === "paid" && previousStatus !== "paid" && order.coupon_code && !order.coupon_redeemed) {
             await connection.query("UPDATE galatic_coupons SET used_count=used_count+1 WHERE code=?", [order.coupon_code]);
@@ -595,7 +637,7 @@ export function createGalaticMySqlStore(databaseUrl) {
           if (result.affectedRows === 0) { await connection.rollback(); return { duplicate: true }; }
         }
         const [[order]] = await connection.query(
-          `SELECT id,payment_status FROM galatic_orders
+          `SELECT id,payment_status,coupon_code,coupon_redeemed,stock_released_at FROM galatic_orders
            WHERE payment_provider=? AND (payment_provider_group_id=? OR payment_provider_order_id=?) FOR UPDATE`,
           [provider, providerGroupId, providerOrderId],
         );
@@ -604,12 +646,31 @@ export function createGalaticMySqlStore(databaseUrl) {
           return { duplicate: false, deferred: true };
         }
         const status = nextPaymentStatus(order.payment_status, installment?.status ?? "open");
+        if (status === "failed" && order.payment_status !== "paid" && !order.stock_released_at) {
+          await releaseReservedStock(connection, order.id);
+          order.stock_released_at = "released";
+        }
+        let fulfillmentStatus = null;
+        if (status === "paid" && order.stock_released_at) {
+          fulfillmentStatus = await reclaimReleasedStock(connection, order.id) ? "paid" : "manual_stock_review";
+        }
         await connection.query(
           `UPDATE galatic_orders SET payment_status=?,paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at,UTC_TIMESTAMP(3)) ELSE paid_at END,
-           fulfillment_status=CASE WHEN ?='paid' AND fulfillment_status='awaiting_payment' THEN 'paid'
+           stock_released_at=CASE WHEN ?='paid' AND ?='paid' THEN NULL WHEN ?='failed' THEN COALESCE(stock_released_at,UTC_TIMESTAMP(3)) ELSE stock_released_at END,
+           fulfillment_status=CASE WHEN ? IS NOT NULL THEN ? WHEN ?='paid' AND fulfillment_status='awaiting_payment' THEN 'paid'
+           WHEN ?='failed' AND fulfillment_status='awaiting_payment' THEN 'payment_failed'
            WHEN ? IN ('refunded','chargeback') THEN 'payment_reversed' ELSE fulfillment_status END WHERE id=?`,
-          [status, status, status, status, order.id],
+          [status, status, status, fulfillmentStatus, status, fulfillmentStatus, fulfillmentStatus,
+            status, status, status, order.id],
         );
+        if (status === "paid" && order.payment_status !== "paid" && order.coupon_code && !order.coupon_redeemed) {
+          await connection.query("UPDATE galatic_coupons SET used_count=used_count+1 WHERE code=?", [order.coupon_code]);
+          await connection.query("UPDATE galatic_orders SET coupon_redeemed=1 WHERE id=?", [order.id]);
+        }
+        if (["refunded","chargeback"].includes(status) && order.coupon_code && order.coupon_redeemed) {
+          await connection.query("UPDATE galatic_coupons SET used_count=GREATEST(used_count-1,0) WHERE code=?", [order.coupon_code]);
+          await connection.query("UPDATE galatic_orders SET coupon_redeemed=0 WHERE id=?", [order.id]);
+        }
         await connection.commit();
         return { duplicate: false, id: order.id, status, previousStatus: order.payment_status };
       } catch (error) { await connection.rollback(); throw error; }
