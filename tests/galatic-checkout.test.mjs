@@ -75,3 +75,36 @@ test("creates an embedded Galatic card order in up to 10x and passes through the
   assert.equal(calls[0].totalValue, expectedTotal / 100); assert.equal(calls[0].creditCard.number, "4444444444444444");
   assert.equal(JSON.stringify(body).includes("4444444444444444"), false);
 });
+
+test("rejects every forbidden Galatic payment method and card plans above 10x before touching Asaas", async (context) => {
+  let providerCalls = 0;
+  const galaticStore = store();
+  const asaasClient = {
+    findCustomersByDocument: async () => { providerCalls += 1; return { data: [] }; },
+    createCustomer: async () => { providerCalls += 1; return { id: "unexpected" }; },
+    createPayment: async () => { providerCalls += 1; return { id: "unexpected" }; },
+  };
+  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+    PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
+  { stores: { galatic: galaticStore }, asaasClient });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const checkout = async (payment) => fetch(`http://127.0.0.1:${server.address().port}/v1/galatic/checkout/orders`, {
+    method: "POST", headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify({ items: [{ sku: "DEP001", quantity: 1 }], buyer: { firstName: "Victor", lastName: "Cronemberger",
+      email: "victor@example.com", phone: "15997671749", documentNumber: "19100000000",
+      address: { postal_code: "06020190", street: "Avenida Franz Voegeli", number: "501", district: "Parque Continental", city: "Osasco", state: "SP" } },
+      shipping: { quoteId: "93b448ca-3dcc-43cd-9d14-02e14745695f" }, payment }),
+  });
+
+  for (const method of ["boleto", "cash", "pix_installment"]) {
+    const response = await checkout({ method, installments: 2 });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, "invalid_payment_method");
+  }
+  const excessiveCard = await checkout({ method: "credit_card", installments: 11, card: {} });
+  assert.equal(excessiveCard.status, 400);
+  assert.equal((await excessiveCard.json()).error, "invalid_installments");
+  assert.equal(providerCalls, 0);
+  assert.equal(galaticStore.state.attached, null);
+});
