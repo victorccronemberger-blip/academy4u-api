@@ -65,8 +65,10 @@ qualquer acesso ao MySQL.
 O adapter de banco da Galatic (`src/store/galatic-mysql-store.js`) já está
 implementado: tabelas `galatic_*` próprias, catálogo físico, cotação de frete
 (ViaCEP + Envia.com), controle de estoque transacional e deduplicação de
-webhooks. O checkout é exclusivamente Pix à vista; produto físico não gera
-matrícula — a confirmação move `fulfillment_status` para `paid`.
+webhooks. O checkout aceita exclusivamente Pix à vista e cartão de crédito de
+1 a 10 parcelas, com o custo financeiro do parcelamento repassado conforme a
+tabela retornada pelo Asaas. Produto físico não gera matrícula — a confirmação
+move `fulfillment_status` para `paid`.
 
 Para incluir `galatic` em `PAYMENT_TENANTS`:
 
@@ -76,8 +78,16 @@ Para incluir `galatic` em `PAYMENT_TENANTS`:
    use também `GALATIC_ENVIA_ENVIRONMENT=sandbox` durante a homologação e
    `GALATIC_ENVIA_WEBHOOK_SECRET` (ou `GALATIC_ENVIA_WEBHOOK_TOKEN`) para
    autenticar e deduplicar atualizações de rastreio;
-3. conjunto completo `GALATIC_SHIPPING_*` (remetente/origem das cotações —
-   sem ele a rota de frete falha fechada com 503);
-4. testes sandbox de Pix para cada plataforma;
-5. webhook confirma no banco correto e não toca o outro banco;
-6. teste de restauração dos dois backups.
+3. conjunto completo `GALATIC_SHIPPING_NAME`, `GALATIC_SHIPPING_EMAIL`,
+   `GALATIC_SHIPPING_PHONE`, `GALATIC_SHIPPING_STREET`,
+   `GALATIC_SHIPPING_NUMBER`, `GALATIC_SHIPPING_DISTRICT`,
+   `GALATIC_SHIPPING_CITY`, `GALATIC_SHIPPING_STATE`,
+   `GALATIC_SHIPPING_POSTAL_CODE` e `GALATIC_SHIPPING_TAX_ID`; sem um único
+   campo a rota de frete falha fechada com 503;
+4. `GALATIC_SMTP_HOST`, `GALATIC_SMTP_PORT`, `GALATIC_SMTP_SECURE`,
+   `GALATIC_SMTP_USER`, `GALATIC_SMTP_PASSWORD`, `GALATIC_MAIL_FROM` e
+   `GALATIC_MAIL_FROM_NAME` para mensagens transacionais;
+5. testes sandbox de Pix e cartão (1x e 10x) para a Galatic e dos meios próprios
+   da Academy4u;
+6. webhook confirma no banco correto e não toca o outro banco;
+7. teste de restauração dos dois backups.

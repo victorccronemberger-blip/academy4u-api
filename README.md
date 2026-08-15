@@ -14,6 +14,12 @@ LMS. O checkout permanece visualmente em `https://academy4u.com.br`.
 - Revogação apenas da matrícula criada por este pedido em caso de estorno ou
   chargeback, preservando acessos anteriores do aluno.
 
+Na Galatic, a política é deliberadamente mais restrita: somente Pix à vista e
+cartão de crédito de 1 a 10 parcelas. Boleto, dinheiro, Pix parcelado e qualquer
+outro meio são rejeitados no servidor antes de chamar o Asaas. O valor de cada
+parcela é calculado a partir das condições retornadas pelo provedor, com o custo
+financeiro repassado ao comprador.
+
 Dados completos de cartão e CVV são transitórios: nunca entram no MySQL, nos
 logs nem nas respostas. Como o checkout próprio recebe esses dados, a
 infraestrutura da Academy permanece no escopo de conformidade PCI DSS.
