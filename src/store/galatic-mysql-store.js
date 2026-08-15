@@ -720,24 +720,31 @@ export function createGalaticMySqlStore(databaseUrl) {
     async listCustomerOrders(customer) {
       await ensureSchema();
       const [rows] = await pool.query(
-        `SELECT id,created_at,payment_status,fulfillment_status,total_cents,subtotal_cents,shipping_cents,
-                payment_method,installments,payment_fee_cents,shipping_address_json
-         FROM galatic_orders WHERE customer_id=? OR (customer_id IS NULL AND buyer_email=?)
-         ORDER BY created_at DESC LIMIT 100`, [customer.id, customer.email],
+        `SELECT o.id,o.created_at,o.payment_status,o.fulfillment_status,o.total_cents,o.subtotal_cents,o.shipping_cents,
+                o.payment_method,o.installments,o.payment_fee_cents,o.shipping_address_json,o.tracking_code,
+                COALESCE(q.service_name,'Entrega via Envia') shipping_service_name
+         FROM galatic_orders o
+         LEFT JOIN galatic_shipping_quotes q ON q.id=o.shipping_quote_id
+         WHERE o.customer_id=? OR (o.customer_id IS NULL AND o.buyer_email=?)
+         ORDER BY o.created_at DESC LIMIT 100`, [customer.id, customer.email],
       );
       return rows.map((row) => ({
         order_number: row.id, created_at: row.created_at, payment_status: row.payment_status,
         shipping_status: row.fulfillment_status, total: Number(row.total_cents), subtotal: Number(row.subtotal_cents),
         shipping_amount: Number(row.shipping_cents), discount_amount: 0, payment_fee_amount: Number(row.payment_fee_cents), currency: "BRL",
-        shipping_service_name: "Entrega Galatic", payment_method: row.payment_method, installments: Number(row.installments),
+        shipping_service_name: row.shipping_service_name, tracking_code: row.tracking_code,
+        payment_method: row.payment_method, installments: Number(row.installments),
       }));
     },
     async getCustomerOrder(customer, orderId) {
       await ensureSchema();
       const [[order]] = await pool.query(
-        `SELECT id,created_at,payment_status,payment_method,installments,fulfillment_status,paid_at,buyer_name,
-                shipping_address_json,subtotal_cents,shipping_cents,discount_cents,payment_fee_cents,total_cents
-         FROM galatic_orders WHERE id=? AND (customer_id=? OR (customer_id IS NULL AND buyer_email=?))`,
+        `SELECT o.id,o.created_at,o.payment_status,o.payment_method,o.installments,o.fulfillment_status,o.paid_at,o.buyer_name,
+                o.shipping_address_json,o.subtotal_cents,o.shipping_cents,o.discount_cents,o.payment_fee_cents,o.total_cents,
+                o.tracking_code,COALESCE(q.service_name,'Entrega via Envia') shipping_service_name
+         FROM galatic_orders o
+         LEFT JOIN galatic_shipping_quotes q ON q.id=o.shipping_quote_id
+         WHERE o.id=? AND (o.customer_id=? OR (o.customer_id IS NULL AND o.buyer_email=?))`,
         [orderId, customer.id, customer.email],
       );
       if (!order) return null;
@@ -748,7 +755,8 @@ export function createGalaticMySqlStore(databaseUrl) {
       return { order: {
         order_number: order.id, created_at: order.created_at, paid_at: order.paid_at,
         payment_status: order.payment_status, payment_method: order.payment_method, installments: Number(order.installments),
-        shipping_status: order.fulfillment_status, shipping_service_name: "Entrega Galatic", customer_name: order.buyer_name,
+        shipping_status: order.fulfillment_status, shipping_service_name: order.shipping_service_name,
+        tracking_code: order.tracking_code, customer_name: order.buyer_name,
         shipping_address: typeof order.shipping_address_json === "string" ? JSON.parse(order.shipping_address_json) : order.shipping_address_json,
         subtotal: Number(order.subtotal_cents), shipping_amount: Number(order.shipping_cents),
         discount_amount: Number(order.discount_cents), payment_fee_amount: Number(order.payment_fee_cents), total: Number(order.total_cents), currency: "BRL",
@@ -757,11 +765,14 @@ export function createGalaticMySqlStore(databaseUrl) {
     async lookupOrder(orderId, email) {
       await ensureSchema();
       const [[row]] = await pool.query(
-        `SELECT id order_number,created_at,payment_status,fulfillment_status shipping_status,total_cents total,
-                shipping_cents shipping_amount,'BRL' currency
-         FROM galatic_orders WHERE id=? AND buyer_email=?`, [orderId, email],
+        `SELECT o.id order_number,o.created_at,o.payment_status,o.fulfillment_status shipping_status,o.total_cents total,
+                o.shipping_cents shipping_amount,o.tracking_code,COALESCE(q.service_name,'Entrega via Envia') shipping_service_name,
+                'BRL' currency
+         FROM galatic_orders o
+         LEFT JOIN galatic_shipping_quotes q ON q.id=o.shipping_quote_id
+         WHERE o.id=? AND o.buyer_email=?`, [orderId, email],
       );
-      return row ? { ...row, total: Number(row.total), shipping_amount: Number(row.shipping_amount), shipping_service_name: "Entrega Galatic" } : null;
+      return row ? { ...row, total: Number(row.total), shipping_amount: Number(row.shipping_amount) } : null;
     },
     async trackingForOrder(orderId) {
       await ensureSchema();
