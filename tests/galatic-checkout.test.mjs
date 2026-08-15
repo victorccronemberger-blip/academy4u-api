@@ -19,7 +19,11 @@ function store() {
 
 test("previews all Galatic card installments with the live Asaas fee table", async (context) => {
   const galaticStore = store();
-  const asaasClient = { getAccountFees: async () => ({ payment: { creditCard: {
+  const simulated = [];
+  const asaasClient = { simulatePayment: async (payload) => {
+    simulated.push(payload);
+    return { creditCard: { feePercentage: payload.installmentCount === 10 ? 4.49 : 2.99, operationFee: 0.49 } };
+  }, getAccountFees: async () => ({ payment: { creditCard: {
     operationValue: 0.49, oneInstallmentPercentage: 2.99,
     upToSixInstallmentsPercentage: 3.49, upToTwelveInstallmentsPercentage: 4.49,
   } } }) };
@@ -39,6 +43,9 @@ test("previews all Galatic card installments with the live Asaas fee table", asy
   assert.equal(body.card.length, 10);
   assert.equal(body.card[0].installments, 1);
   assert.equal(body.card[9].installments, 10);
+  assert.equal(body.card[0].source, "asaas_sales_simulator");
+  assert.equal(simulated.length, 10);
+  assert.deepEqual(simulated[9], { value: 474.99, installmentCount: 10, billingTypes: ["CREDIT_CARD"] });
   assert.equal(body.card[0].totalCents, Math.ceil((47499 + 49) / (1 - 0.0299)));
   assert.equal(body.card[9].totalCents, Math.ceil((47499 + 49) / (1 - 0.0449)));
 });

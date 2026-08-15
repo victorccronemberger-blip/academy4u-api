@@ -109,16 +109,51 @@ function cardPricing(baseCents, installments, fees) {
     installmentCents: Math.ceil(totalCents / installments) };
 }
 
+function simulatedCardPricing(baseCents, installments, simulation) {
+  const card = simulation?.creditCard;
+  const percentage = Number(card?.feePercentage);
+  const fixedCents = Math.max(0, Math.round(Number(card?.operationFee ?? 0) * 100));
+  if (!Number.isFinite(percentage) || percentage < 0 || percentage >= 30 || !Number.isFinite(fixedCents)) return null;
+  const totalCents = Math.ceil((baseCents + fixedCents) / (1 - percentage / 100));
+  return { baseCents, totalCents, feeCents: totalCents - baseCents, percentage,
+    installmentCents: Math.ceil(totalCents / installments), source: "asaas_sales_simulator" };
+}
+
 export function createGalaticCheckoutRouter(express, { environment, asaasClient, store, notifications = null }) {
   const router = express.Router();
   const writeLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 12, prefix: "galatic-checkout" });
   const readLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 60, prefix: "galatic-order" });
   let feeCache = null;
+  const simulationCache = new Map();
   async function accountFees() {
     if (feeCache?.expiresAt > Date.now()) return feeCache.value;
     const value = await asaasClient.getAccountFees();
     feeCache = { value, expiresAt: Date.now() + 15 * 60_000 };
     return value;
+  }
+  async function providerCardPricing(baseCents, installments) {
+    const cacheKey = `${baseCents}:${installments}`;
+    const cached = simulationCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return cached.value;
+    if (typeof asaasClient?.simulatePayment === "function") {
+      try {
+        const simulation = await asaasClient.simulatePayment({
+          value: baseCents / 100,
+          installmentCount: installments,
+          billingTypes: ["CREDIT_CARD"],
+        });
+        const pricing = simulatedCardPricing(baseCents, installments, simulation);
+        if (pricing) {
+          simulationCache.set(cacheKey, { value: pricing, expiresAt: Date.now() + 15 * 60_000 });
+          return pricing;
+        }
+      } catch (error) {
+        console.error("Asaas sales simulation unavailable; using account fee fallback", { status: error?.status, code: error?.code });
+      }
+    }
+    const fallback = { ...cardPricing(baseCents, installments, await accountFees()), source: "asaas_account_fees" };
+    simulationCache.set(cacheKey, { value: fallback, expiresAt: Date.now() + 5 * 60_000 });
+    return fallback;
   }
   router.get("/status", (_request, response) => response.json({ enabled: environment.checkoutEnabled, provider: "asaas", environment: environment.asaasEnvironment,
     methods: environment.checkoutEnabled ? ["pix", "credit_card"] : [], cardMode: "embedded_api", cardInstallmentMaximum: 10,
@@ -137,13 +172,12 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       const buyerEmail = String(request.body?.buyerEmail ?? "").trim().toLowerCase();
       if (couponCode && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(buyerEmail)) throw new GalaticInputError("Informe o e-mail para validar o cupom.", "invalid_email");
       const preview = await store.previewCheckout({ items: cart, quoteId, buyerEmail, couponCode });
-      const fees = await accountFees();
-      const plans = Array.from({ length: 10 }, (_, index) => {
+      const plans = await Promise.all(Array.from({ length: 10 }, async (_, index) => {
         const installments = index + 1;
-        const pricing = cardPricing(preview.totalCents, installments, fees);
+        const pricing = await providerCardPricing(preview.totalCents, installments);
         return { installments, installmentCents: pricing.installmentCents, totalCents: pricing.totalCents,
-          feeCents: pricing.feeCents, percentage: pricing.percentage };
-      });
+          feeCents: pricing.feeCents, percentage: pricing.percentage, source: pricing.source };
+      }));
       return response.json({ currency: "brl", pix: { totalCents: preview.totalCents }, card: plans, ...preview });
     } catch (error) {
       if (["product_unavailable", "insufficient_stock", "invalid_shipping_quote", "shipping_quote_mismatch"].includes(error?.code)) {
@@ -194,7 +228,7 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       const payload = { customer: providerCustomerId, billingType: selectedPayment.method === "pix" ? "PIX" : "CREDIT_CARD",
         dueDate, description: `Pedido Galatic ${order.id}`, externalReference: `galatic:${order.id}` };
       if (selectedPayment.method === "credit_card") {
-        pricing = cardPricing(order.totalCents, selectedPayment.installments, await accountFees());
+        pricing = await providerCardPricing(order.totalCents, selectedPayment.installments);
         payload.creditCard = selectedPayment.card;
         payload.creditCardHolderInfo = cardHolderInfo({ ...customer, cpfCnpj: customer.document, mobilePhone: customer.phone, ip: request.ip });
         payload.remoteIp = request.ip;
