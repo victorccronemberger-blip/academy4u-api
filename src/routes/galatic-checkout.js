@@ -124,6 +124,38 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
     methods: environment.checkoutEnabled ? ["pix", "credit_card"] : [], cardMode: "embedded_api", cardInstallmentMaximum: 10,
     cardInterest: "asaas_fees_passed_to_customer", pixInstallment: false }));
 
+  router.post("/installments", readLimiter, async (request, response) => {
+    if (!environment.checkoutEnabled || !asaasClient || !store.previewCheckout) {
+      return response.status(503).json({ error: "checkout_unavailable", message: "Condições de pagamento temporariamente indisponíveis." });
+    }
+    try {
+      const cart = items(request.body?.items);
+      const quoteId = String(request.body?.shipping?.quoteId ?? "").trim();
+      if (!/^[0-9a-f-]{36}$/i.test(quoteId)) throw new GalaticInputError("Frete ausente ou expirado.", "invalid_shipping_quote");
+      const couponCode = String(request.body?.couponCode ?? "").trim().toUpperCase() || null;
+      if (couponCode && !/^[A-Z0-9_-]{3,40}$/.test(couponCode)) throw new GalaticInputError("Cupom inválido.", "invalid_coupon");
+      const buyerEmail = String(request.body?.buyerEmail ?? "").trim().toLowerCase();
+      if (couponCode && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(buyerEmail)) throw new GalaticInputError("Informe o e-mail para validar o cupom.", "invalid_email");
+      const preview = await store.previewCheckout({ items: cart, quoteId, buyerEmail, couponCode });
+      const fees = await accountFees();
+      const plans = Array.from({ length: 10 }, (_, index) => {
+        const installments = index + 1;
+        const pricing = cardPricing(preview.totalCents, installments, fees);
+        return { installments, installmentCents: pricing.installmentCents, totalCents: pricing.totalCents,
+          feeCents: pricing.feeCents, percentage: pricing.percentage };
+      });
+      return response.json({ currency: "brl", pix: { totalCents: preview.totalCents }, card: plans, ...preview });
+    } catch (error) {
+      if (["product_unavailable", "insufficient_stock", "invalid_shipping_quote", "shipping_quote_mismatch"].includes(error?.code)) {
+        return response.status(409).json({ error: error.code, message: "Preço, estoque ou frete mudou. Recalcule o carrinho." });
+      }
+      if (["invalid_coupon", "invalid_email"].includes(error?.code)) {
+        return response.status(400).json({ error: error.code, message: error.message === "invalid_coupon" ? "Cupom inválido, expirado ou indisponível para esta compra." : error.message });
+      }
+      throw error;
+    }
+  });
+
   router.post("/orders", writeLimiter, async (request, response) => {
     if (!environment.checkoutEnabled || !asaasClient) return response.status(503).json({ error: "checkout_unavailable", message: "Pagamento temporariamente indisponível." });
     let key; let cart; let customer; let quoteId; let selectedPayment;

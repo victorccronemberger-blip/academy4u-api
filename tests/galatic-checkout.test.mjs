@@ -7,6 +7,7 @@ function store() {
   return {
     state,
     ensureSchema: async () => {}, close: async () => {},
+    previewCheckout: async () => ({ subtotalCents: 44999, shippingCents: 2500, discountCents: 0, couponCode: null, totalCents: 47499 }),
     prepareOrder: async (input) => { state.prepared = input; return { kind: "created", order: { id: "52c02ff3-b755-4df5-90ba-20ea8c8bd035", subtotalCents: 44999, shippingCents: 2500, totalCents: 47499, lines: [{ sku: "DEP001", title: "Deep Regrets", quantity: 1, unitAmountCents: 44999 }] } }; },
     attachPayment: async (...args) => { state.attached = args; },
     completeCheckoutAttempt: async (...args) => { state.completed = args; },
@@ -15,6 +16,32 @@ function store() {
     updateOrderFromWebhook: async () => ({ deferred: true }),
   };
 }
+
+test("previews all Galatic card installments with the live Asaas fee table", async (context) => {
+  const galaticStore = store();
+  const asaasClient = { getAccountFees: async () => ({ payment: { creditCard: {
+    operationValue: 0.49, oneInstallmentPercentage: 2.99,
+    upToSixInstallmentsPercentage: 3.49, upToTwelveInstallmentsPercentage: 4.49,
+  } } }) };
+  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+    PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
+  { stores: { galatic: galaticStore }, asaasClient });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/galatic/checkout/installments`, { method: "POST",
+    headers: { "content-type": "application/json", origin: "https://galatic.com.br" },
+    body: JSON.stringify({ items: [{ sku: "DEP001", quantity: 1 }],
+      shipping: { quoteId: "93b448ca-3dcc-43cd-9d14-02e14745695f" } }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.pix.totalCents, 47499);
+  assert.equal(body.card.length, 10);
+  assert.equal(body.card[0].installments, 1);
+  assert.equal(body.card[9].installments, 10);
+  assert.equal(body.card[0].totalCents, Math.ceil((47499 + 49) / (1 - 0.0299)));
+  assert.equal(body.card[9].totalCents, Math.ceil((47499 + 49) / (1 - 0.0449)));
+});
 
 test("creates a server-priced Galatic Pix order with a project-scoped reference", async (context) => {
   const galaticStore = store(); const calls = [];

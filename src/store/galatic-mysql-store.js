@@ -378,6 +378,56 @@ export function createGalaticMySqlStore(databaseUrl) {
         heightCm: row.height_cm === null ? null : Number(row.height_cm),
       }));
     },
+    async previewCheckout({ items, quoteId, buyerEmail = "", couponCode = null }) {
+      await ensureSchema();
+      const keys = [...new Set(items.map((item) => item.key))];
+      const placeholders = keys.map(() => "?").join(",");
+      const [products] = await pool.query(
+        `SELECT sku,slug,unit_amount_cents,active,manage_stock,stock_quantity
+         FROM galatic_products WHERE sku IN (${placeholders}) OR slug IN (${placeholders})`,
+        [...keys, ...keys],
+      );
+      const byKey = new Map();
+      for (const product of products) { byKey.set(product.sku, product); byKey.set(product.slug, product); }
+      const lines = items.map((item) => ({ product: byKey.get(item.key), quantity: item.quantity }));
+      if (lines.some((line) => !line.product || !line.product.active)) throw Object.assign(new Error("product_unavailable"), { code: "product_unavailable" });
+      for (const line of lines) {
+        if (line.product.manage_stock && (!Number.isInteger(line.product.stock_quantity) || Number(line.product.stock_quantity) < line.quantity)) {
+          throw Object.assign(new Error("insufficient_stock"), { code: "insufficient_stock" });
+        }
+      }
+      const [[quote]] = await pool.query(
+        `SELECT id,amount_cents FROM galatic_shipping_quotes
+         WHERE id=? AND status='quoted' AND expires_at>UTC_TIMESTAMP(3)`, [quoteId],
+      );
+      if (!quote) throw Object.assign(new Error("invalid_shipping_quote"), { code: "invalid_shipping_quote" });
+      const [quotedItems] = await pool.query(
+        "SELECT sku,quantity FROM galatic_shipping_quote_items WHERE quote_id=?", [quoteId],
+      );
+      const expected = lines.map((line) => `${line.product.sku}:${line.quantity}`).sort().join("|");
+      const quoted = quotedItems.map((item) => `${item.sku}:${Number(item.quantity)}`).sort().join("|");
+      if (expected !== quoted) throw Object.assign(new Error("shipping_quote_mismatch"), { code: "shipping_quote_mismatch" });
+      const subtotalCents = lines.reduce((sum, line) => sum + Number(line.product.unit_amount_cents) * line.quantity, 0);
+      const shippingCents = Number(quote.amount_cents);
+      let discountCents = 0; let normalizedCoupon = null;
+      if (couponCode) {
+        normalizedCoupon = String(couponCode).trim().toUpperCase();
+        const [[coupon]] = await pool.query("SELECT * FROM galatic_coupons WHERE code=? AND active=1", [normalizedCoupon]);
+        if (!coupon || Number(coupon.minimum_cents) > subtotalCents || (coupon.usage_limit !== null && Number(coupon.used_count) >= Number(coupon.usage_limit))) {
+          throw Object.assign(new Error("invalid_coupon"), { code: "invalid_coupon" });
+        }
+        const [[usage]] = await pool.query(
+          "SELECT COUNT(*) total FROM galatic_orders WHERE buyer_email=? AND coupon_code=? AND coupon_redeemed=1", [buyerEmail, normalizedCoupon],
+        );
+        if (Number(usage.total) >= Number(coupon.per_customer_limit)) throw Object.assign(new Error("coupon_limit_reached"), { code: "invalid_coupon" });
+        discountCents = coupon.discount_type === "percent"
+          ? Math.floor(subtotalCents * Math.min(100, Number(coupon.discount_value)) / 100)
+          : Math.min(subtotalCents, Number(coupon.discount_value));
+      }
+      const totalCents = subtotalCents - discountCents + shippingCents;
+      if (totalCents < 50) throw Object.assign(new Error("checkout_below_minimum"), { code: "invalid_coupon" });
+      return { subtotalCents, shippingCents, discountCents, couponCode: normalizedCoupon, totalCents };
+    },
     async prepareOrder({ key, fingerprint, items, quoteId, buyer, paymentMethod = "pix", installments = 1, couponCode = null }) {
       await ensureSchema();
       const connection = await pool.getConnection();
