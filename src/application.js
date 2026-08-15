@@ -293,7 +293,7 @@ export function createApp(overrides = {}, dependencies = {}) {
         notifications: galaticNotifications,
       }));
       app.use("/v1/galatic/admin", ...middleware, createGalaticAdminRouter(express, {
-        environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment,
+        environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment, asaasClient,
       }));
       const shippingRouter = createGalaticShippingRouter(express, {
         environment: context.environment,

@@ -1,5 +1,6 @@
 import { hashPassword, normalizeEmail, opaqueToken, tokenHash, verifyPassword } from "../domain/password.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
+import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 
 const clean = (value, maximum = 255) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maximum);
 const integer = (value, minimum = 0) => {
@@ -55,7 +56,7 @@ function couponInput(body) {
   return { description: clean(body?.description), type, value, minimum, limit, perCustomer, active: body?.active === undefined || enabled(body.active) };
 }
 
-export function createGalaticAdminRouter(express, { environment, store, notifications = null, fulfillment = null }) {
+export function createGalaticAdminRouter(express, { environment, store, notifications = null, fulfillment = null, asaasClient = null }) {
   const router = express.Router();
   const authLimiter = createFixedWindowLimiter({ limit: 10, windowMs: 60_000, prefix: "galatic-admin-auth" });
 
@@ -138,6 +139,50 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   router.get("/orders", async (_request, response) => response.json({ orders: await store.adminListOrders() }));
   router.get("/orders/:id", async (request, response) => {
     const result = await store.adminOrder(request.params.id); return result ? response.json(result) : response.status(404).json({ error: "order_not_found" });
+  });
+  router.post("/orders/:id/payment/cancel", async (request, response) => {
+    if (!asaasClient) return response.status(503).json({ error: "payment_unavailable" });
+    const order = await store.adminPaymentContext(request.params.id);
+    if (!order) return response.status(404).json({ error: "order_not_found" });
+    if (["paid", "refunded", "chargeback"].includes(order.status)) {
+      return response.status(409).json({ error: "paid_order_cannot_be_canceled", message: "Use o fluxo de estorno para um pedido pago." });
+    }
+    try {
+      if (!order.providerOrderId) {
+        const canceled = await store.adminCancelUnpaidOrder(order.id);
+        return response.json({ canceled: Boolean(canceled), order_id: order.id });
+      }
+      const provider = await asaasClient.getPayment(order.providerOrderId);
+      if (normalizeAsaasPaymentStatus(provider?.status) === "paid") {
+        await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: order.providerOrderId, status: "paid" });
+        return response.status(409).json({ error: "payment_already_received", message: "O pagamento já foi recebido e não pode ser cancelado." });
+      }
+      if (order.providerGroupId) await asaasClient.deleteInstallment(order.providerGroupId);
+      else await asaasClient.deletePayment(order.providerOrderId);
+      const canceled = await store.adminCancelUnpaidOrder(order.id);
+      return response.json({ canceled: Boolean(canceled), order_id: order.id });
+    } catch (error) {
+      return response.status(error?.status === 404 && order.status === "canceled" ? 200 : 502).json({
+        error: error?.code ?? "payment_cancellation_failed", message: "Não foi possível cancelar a cobrança no Asaas.",
+      });
+    }
+  });
+  router.post("/orders/:id/payment/refund", async (request, response) => {
+    if (!asaasClient) return response.status(503).json({ error: "payment_unavailable" });
+    const order = await store.adminPaymentContext(request.params.id);
+    if (!order) return response.status(404).json({ error: "order_not_found" });
+    if (clean(request.body?.confirmation, 80) !== order.id) {
+      return response.status(400).json({ error: "refund_confirmation_required", message: "Confirme com o número completo do pedido." });
+    }
+    if (order.status !== "paid") return response.status(409).json({ error: "order_not_paid" });
+    try {
+      await asaasClient.refundPayment(order.providerOrderId);
+      await store.recordOperationalAlert?.({ type: "refund_requested", severity: "info", source: "galatic-admin",
+        summary: "Estorno integral solicitado ao Asaas.", context: { orderId: order.id, adminId: request.galaticAdmin.id } });
+      return response.status(202).json({ requested: true, order_id: order.id, message: "Estorno solicitado. A confirmação será conciliada pelo webhook do Asaas." });
+    } catch (error) {
+      return response.status(502).json({ error: error?.code ?? "refund_failed", message: "O Asaas não aceitou a solicitação de estorno." });
+    }
   });
   router.post("/orders/:id/shipping/manual-dispatch", async (request, response) => {
     const tracking = clean(request.body?.tracking_code, 100);

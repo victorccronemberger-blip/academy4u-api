@@ -14,6 +14,7 @@ export function normalizeAsaasPaymentStatus(value) {
   if (OVERDUE_PROVIDER_STATUSES.has(status)) return "overdue";
   if (REFUNDED_PROVIDER_STATUSES.has(status)) return "refunded";
   if (CHARGEBACK_PROVIDER_STATUSES.has(status)) return "chargeback";
+  if (["DELETED", "CANCELED", "CANCELLED"].includes(status)) return "canceled";
   return "processing";
 }
 
@@ -23,6 +24,7 @@ export function normalizeAsaasWebhookStatus(eventValue, paymentStatus) {
   if (["PAYMENT_REFUNDED", "PAYMENT_RECEIVED_IN_CASH_UNDONE"].includes(event)) return "refunded";
   if (["PAYMENT_CHARGEBACK_REQUESTED", "PAYMENT_CHARGEBACK_DISPUTE"].includes(event)) return "chargeback";
   if (event === "PAYMENT_OVERDUE") return "overdue";
+  if (["PAYMENT_DELETED", "PAYMENT_CANCELED", "PAYMENT_CANCELLED"].includes(event)) return "canceled";
   if (["PAYMENT_CONFIRMED", "PAYMENT_RECEIVED"].includes(event)) return "paid";
   return normalizeAsaasPaymentStatus(paymentStatus);
 }
