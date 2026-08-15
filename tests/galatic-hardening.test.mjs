@@ -108,6 +108,34 @@ test("parses the Galatic shipping origin only when the full variable set is pres
   assert.equal(getEnvironment(partial).galaticShippingOrigin, null);
 });
 
+test("passes the configured Galatic shipping origin into the tenant router", async (context) => {
+  const complete = {
+    GALATIC_ENVIA_API_KEY: "envia_test", GALATIC_SHIPPING_NAME: "Galatic Games",
+    GALATIC_SHIPPING_EMAIL: "comercial@example.com", GALATIC_SHIPPING_PHONE: "15997671749",
+    GALATIC_SHIPPING_STREET: "Avenida Exemplo", GALATIC_SHIPPING_NUMBER: "501",
+    GALATIC_SHIPPING_DISTRICT: "Centro", GALATIC_SHIPPING_CITY: "Osasco", GALATIC_SHIPPING_STATE: "SP",
+    GALATIC_SHIPPING_POSTAL_CODE: "06020190", GALATIC_SHIPPING_TAX_ID: "67956916000190",
+  };
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), body: options?.body });
+    if (String(url).includes("viacep")) return new Response(JSON.stringify({ logradouro: "Avenida Teste", bairro: "Centro", localidade: "Osasco", uf: "SP" }), { status: 200 });
+    return new Response(JSON.stringify({ data: [{ carrierDescription: "Correios", serviceDescription: "PAC", service: "PAC", totalPrice: 25, deliveryDate: { dateDifference: 4 } }] }), { status: 200 });
+  };
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const galaticStore = { ...fakeGalaticStore(),
+    getProductsForCheckout: async () => [{ sku: "DEP001", slug: "deep-regrets", title: "Deep Regrets", unitAmountCents: 44999,
+      active: true, manageStock: true, stockQuantity: 2, weightGrams: 1200, lengthCm: 30, widthCm: 30, heightCm: 8 }],
+    createShippingQuotes: async ({ quotes }) => quotes.map((quote) => ({ ...quote, id: crypto.randomUUID() })),
+  };
+  const port = await startApp(context, complete, { stores: { galatic: galaticStore }, asaasClient: {} });
+  const response = await originalFetch(`http://127.0.0.1:${port}/v1/galatic/quote`, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [{ sku: "DEP001", quantity: 1 }], postalCode: "06020190" }) });
+  assert.equal(response.status, 200); assert.equal((await response.json()).quotes[0].amount, 2500);
+  assert.equal(calls.some((call) => call.url.includes("api.envia.com")), true);
+});
+
 test("the real Galatic MySQL store implements the full webhook store interface", async () => {
   const store = createGalaticMySqlStore("mysql://galatic:secret@127.0.0.1:3306/galatic");
   try {

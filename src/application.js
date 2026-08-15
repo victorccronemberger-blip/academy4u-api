@@ -101,6 +101,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       paymentReferencePrefix: tenant.referencePrefix,
       successOrigin: source[`${tenant.variablePrefix}_SUCCESS_ORIGIN`]?.trim() || tenant.publicOrigin,
       galaticEnviaApiKey: environment.galaticEnviaApiKey,
+      galaticShippingOrigin: environment.galaticShippingOrigin,
     };
     const injectedStore = dependencies.stores?.[tenant.id]
       ?? (tenant.isDefault ? dependencies.store : null);
