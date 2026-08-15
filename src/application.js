@@ -254,6 +254,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     },
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Accept", "Authorization", "Idempotency-Key", "asaas-access-token", "x-academy-trusted-token"],
+    credentials: true,
     maxAge: 86_400,
   }));
   app.use(express.json({ limit: "32kb", verify(request, _response, buffer) { request.rawBody = buffer.toString("utf8"); } }));

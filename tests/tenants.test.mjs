@@ -60,6 +60,19 @@ test("keeps tenant routes and browser origins isolated", async (context) => {
   const address = server.address();
   const base = `http://127.0.0.1:${address.port}`;
 
+  const preflight = await fetch(`${base}/v1/galatic/admin/me`, {
+    method: "OPTIONS",
+    headers: {
+      origin: "https://galatic.com.br",
+      "access-control-request-method": "GET",
+      "access-control-request-headers": "authorization",
+    },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://galatic.com.br");
+  assert.equal(preflight.headers.get("access-control-allow-credentials"), "true");
+  assert.match(preflight.headers.get("access-control-allow-headers"), /Authorization/i);
+
   const rejected = await fetch(`${base}/v1/platforms/academy4u/public/products`, {
     headers: { origin: "https://galatic.com.br" },
   });
