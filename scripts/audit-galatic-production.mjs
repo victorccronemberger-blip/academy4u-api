@@ -4,6 +4,11 @@ const apiOrigin = String(process.env.GALATIC_AUDIT_API_ORIGIN || "https://api.ac
 const storefrontOrigin = String(process.env.GALATIC_AUDIT_STOREFRONT_ORIGIN || "https://galatic.com.br").replace(/\/$/, "");
 const sku = String(process.env.GALATIC_AUDIT_SKU || "DEP001").trim().toUpperCase();
 const postalCode = String(process.env.GALATIC_AUDIT_POSTAL_CODE || "06020190").replace(/\D/g, "");
+const environmentArg = process.argv.find((argument) => argument.startsWith("--environment="));
+const expectedPaymentEnvironment = String(
+  environmentArg?.split("=")[1] || process.env.GALATIC_AUDIT_EXPECTED_ENVIRONMENT || "production",
+).trim().toLowerCase();
+assert.ok(["sandbox", "production"].includes(expectedPaymentEnvironment), "ambiente de auditoria inválido");
 const headers = { accept: "application/json", origin: storefrontOrigin };
 
 async function request(path, options = {}) {
@@ -19,7 +24,11 @@ async function request(path, options = {}) {
 const checkout = await request("/v1/galatic/checkout/status");
 assert.equal(checkout.response.status, 200, "status do checkout indisponível");
 assert.equal(checkout.body.enabled, true, "checkout desabilitado");
-assert.equal(checkout.body.environment, "production", "Asaas ainda não está em produção");
+assert.equal(
+  checkout.body.environment,
+  expectedPaymentEnvironment,
+  `Asaas não está no ambiente esperado: ${expectedPaymentEnvironment}`,
+);
 assert.deepEqual(checkout.body.methods, ["pix", "credit_card"], "métodos de pagamento divergentes");
 assert.equal(checkout.body.cardMode, "embedded_api", "cartão não está embutido");
 assert.equal(checkout.body.cardInstallmentMaximum, 10, "limite de parcelas divergente");
