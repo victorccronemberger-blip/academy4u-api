@@ -17,6 +17,7 @@ import { createGalaticCheckoutRouter } from "./routes/galatic-checkout.js";
 import { createGalaticShippingRouter } from "./routes/galatic-shipping.js";
 import { createGalaticCustomerRouter } from "./routes/galatic-customer.js";
 import { createGalaticPublicRouter } from "./routes/galatic-public.js";
+import { createGalaticAdminRouter } from "./routes/galatic-admin.js";
 import { createInstallmentService } from "./services/installment-service.js";
 import { createInMemoryStore } from "./store/in-memory-store.js";
 import { createGalaticMySqlStore } from "./store/galatic-mysql-store.js";
@@ -280,6 +281,9 @@ export function createApp(overrides = {}, dependencies = {}) {
         asaasClient,
         store: context.store,
         notifications: galaticNotifications,
+      }));
+      app.use("/v1/galatic/admin", ...middleware, createGalaticAdminRouter(express, {
+        environment: context.environment, store: context.store, notifications: galaticNotifications,
       }));
       app.use("/v1/galatic/quote", ...middleware, createGalaticShippingRouter(express, {
         environment: context.environment,

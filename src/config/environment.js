@@ -90,6 +90,8 @@ export function getEnvironment(source = process.env) {
     paymentReferencePrefix: "academy",
     galaticEnviaApiKey: source.GALATIC_ENVIA_API_KEY?.trim() || null,
     galaticShippingOrigin: parseGalaticShippingOrigin(source),
+    galaticAdminEmail: source.GALATIC_ADMIN_EMAIL?.trim().toLowerCase() || null,
+    galaticAdminPassword: source.GALATIC_ADMIN_PASSWORD || null,
     asaasEnvironment,
     asaasRequested,
     asaasProductionApiKey,

@@ -3,11 +3,11 @@ import test from "node:test";
 import { createApp } from "../src/application.js";
 
 function store() {
-  const state = { attached: null, completed: null };
+  const state = { attached: null, completed: null, prepared: null };
   return {
     state,
     ensureSchema: async () => {}, close: async () => {},
-    prepareOrder: async () => ({ kind: "created", order: { id: "52c02ff3-b755-4df5-90ba-20ea8c8bd035", subtotalCents: 44999, shippingCents: 2500, totalCents: 47499, lines: [{ sku: "DEP001", title: "Deep Regrets", quantity: 1, unitAmountCents: 44999 }] } }),
+    prepareOrder: async (input) => { state.prepared = input; return { kind: "created", order: { id: "52c02ff3-b755-4df5-90ba-20ea8c8bd035", subtotalCents: 44999, shippingCents: 2500, totalCents: 47499, lines: [{ sku: "DEP001", title: "Deep Regrets", quantity: 1, unitAmountCents: 44999 }] } }; },
     attachPayment: async (...args) => { state.attached = args; },
     completeCheckoutAttempt: async (...args) => { state.completed = args; },
     releaseFailedOrder: async () => assert.fail("order should not be released"),
@@ -35,11 +35,12 @@ test("creates a server-priced Galatic Pix order with a project-scoped reference"
     body: JSON.stringify({ items: [{ sku: "DEP001", quantity: 1 }], buyer: { firstName: "Victor", lastName: "Cronemberger",
       email: "victor@example.com", phone: "15997671749", documentNumber: "19100000000",
       address: { postal_code: "06020190", street: "Avenida Franz Voegeli", number: "501", district: "Parque Continental", city: "Osasco", state: "SP" } },
-      shipping: { quoteId: "93b448ca-3dcc-43cd-9d14-02e14745695f" }, payment: { method: "pix" } }),
+      shipping: { quoteId: "93b448ca-3dcc-43cd-9d14-02e14745695f" }, couponCode: " MESA10 ", payment: { method: "pix" } }),
   });
   assert.equal(response.status, 201); const body = await response.json();
   assert.equal(body.orderId, "52c02ff3-b755-4df5-90ba-20ea8c8bd035"); assert.equal(body.totalCents, 47499);
   assert.equal(calls[0].value, 474.99); assert.equal(calls[0].externalReference, "galatic:52c02ff3-b755-4df5-90ba-20ea8c8bd035");
+  assert.equal(galaticStore.state.prepared.couponCode, "MESA10");
   assert.deepEqual(galaticStore.state.attached, ["52c02ff3-b755-4df5-90ba-20ea8c8bd035", "pay_galatic_1", "open", {
     method: "pix", installments: 1, installmentAmountCents: 47499, paymentFeeCents: 0, totalCents: 47499, providerGroupId: null,
   }]);

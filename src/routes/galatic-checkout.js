@@ -138,12 +138,15 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
     }
     const fingerprint = createHash("sha256").update(JSON.stringify(request.body)).digest("hex");
     let prepared;
+    const couponCode = String(request.body?.couponCode ?? "").trim().toUpperCase() || null;
+    if (couponCode && !/^[A-Z0-9_-]{3,40}$/.test(couponCode)) return response.status(400).json({ error: "invalid_coupon", message: "Cupom inválido." });
     try { prepared = await store.prepareOrder({ key, fingerprint, items: cart, quoteId, buyer: customer,
-      paymentMethod: selectedPayment.method, installments: selectedPayment.installments }); }
+      paymentMethod: selectedPayment.method, installments: selectedPayment.installments, couponCode }); }
     catch (error) {
       if (["product_unavailable", "insufficient_stock", "invalid_shipping_quote", "shipping_quote_mismatch"].includes(error?.code)) {
         return response.status(409).json({ error: error.code, message: "Preço, estoque ou frete mudou. Recalcule o carrinho." });
       }
+      if (error?.code === "invalid_coupon") return response.status(400).json({ error: "invalid_coupon", message: "Cupom inválido, expirado ou indisponível para esta compra." });
       throw error;
     }
     if (prepared.kind === "conflict") return response.status(409).json({ error: "idempotency_conflict" });
@@ -179,7 +182,8 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       if (selectedPayment.method === "pix") try { instructions = pix(await asaasClient.getPixQrCode(providerPayment.id)); } catch (error) { console.error("Galatic Pix is being prepared", { code: error?.code, status: error?.status }); }
       const result = { status: 201, body: { orderId: order.id, status, method: selectedPayment.method,
         installments: selectedPayment.installments, installmentCents: pricing.installmentCents, cardFeeCents: pricing.feeCents,
-        subtotalCents: order.subtotalCents, shippingCents: order.shippingCents, baseTotalCents: order.totalCents,
+        subtotalCents: order.subtotalCents, shippingCents: order.shippingCents, discountCents: order.discountCents ?? 0,
+        couponCode: order.couponCode ?? null, baseTotalCents: order.totalCents,
         totalCents: pricing.totalCents, ...(selectedPayment.method === "pix" ? (instructions ? { pix: instructions } : { pixPending: true })
           : { message: status === "paid" ? "Pagamento aprovado." : "Pagamento recebido e em análise." }) } };
       await store.completeCheckoutAttempt(key, result);

@@ -169,6 +169,41 @@ export function createGalaticMySqlStore(databaseUrl) {
           created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
           updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
         )`,
+        `CREATE TABLE IF NOT EXISTS galatic_admin_users (
+          id CHAR(36) PRIMARY KEY, name VARCHAR(160) NOT NULL, email VARCHAR(160) NOT NULL UNIQUE,
+          password_hash VARCHAR(255) NOT NULL, role VARCHAR(24) NOT NULL DEFAULT 'owner',
+          status VARCHAR(24) NOT NULL DEFAULT 'active', last_login_at DATETIME(3) NULL,
+          created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_admin_sessions (
+          id CHAR(36) PRIMARY KEY, admin_id CHAR(36) NOT NULL, token_hash CHAR(64) NOT NULL UNIQUE,
+          expires_at DATETIME(3) NOT NULL, revoked_at DATETIME(3) NULL,
+          created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          INDEX galatic_admin_sessions_lookup (token_hash,revoked_at,expires_at),
+          CONSTRAINT galatic_admin_sessions_user_fk FOREIGN KEY (admin_id) REFERENCES galatic_admin_users(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_coupons (
+          code VARCHAR(40) PRIMARY KEY, description VARCHAR(255) NULL,
+          discount_type VARCHAR(16) NOT NULL, discount_value INT UNSIGNED NOT NULL,
+          minimum_cents INT UNSIGNED NOT NULL DEFAULT 0, usage_limit INT UNSIGNED NULL,
+          per_customer_limit INT UNSIGNED NOT NULL DEFAULT 1, used_count INT UNSIGNED NOT NULL DEFAULT 0,
+          active TINYINT(1) NOT NULL DEFAULT 1, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_tracking_events (
+          id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id CHAR(36) NOT NULL,
+          status VARCHAR(32) NOT NULL, tracking_code VARCHAR(100) NULL, description VARCHAR(500) NULL,
+          created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          INDEX galatic_tracking_order_time (order_id,created_at),
+          CONSTRAINT galatic_tracking_order_fk FOREIGN KEY (order_id) REFERENCES galatic_orders(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_admin_emails (
+          id CHAR(36) PRIMARY KEY, recipient VARCHAR(160) NOT NULL, subject VARCHAR(160) NOT NULL,
+          template_key VARCHAR(48) NOT NULL, message TEXT NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'pending',
+          error_message VARCHAR(500) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          sent_at DATETIME(3) NULL, INDEX galatic_admin_emails_status_time (status,created_at)
+        )`,
       ];
       for (const statement of statements) await pool.query(statement);
       for (const alteration of [
@@ -180,6 +215,21 @@ export function createGalaticMySqlStore(databaseUrl) {
         "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS payment_fee_cents INT UNSIGNED NOT NULL DEFAULT 0 AFTER installment_amount_cents",
         "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS discount_cents INT UNSIGNED NOT NULL DEFAULT 0 AFTER shipping_cents",
         "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS paid_at DATETIME(3) NULL AFTER fulfillment_status",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS tracking_code VARCHAR(100) NULL AFTER paid_at",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS coupon_code VARCHAR(40) NULL AFTER discount_cents",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS coupon_redeemed TINYINT(1) NOT NULL DEFAULT 0 AFTER coupon_code",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS cost_amount_cents INT UNSIGNED NULL AFTER unit_amount_cents",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS source_url VARCHAR(1000) NULL AFTER image_url",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS editorial_status VARCHAR(24) NOT NULL DEFAULT 'draft' AFTER source_url",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS seo_title VARCHAR(70) NULL AFTER editorial_status",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS seo_description VARCHAR(170) NULL AFTER seo_title",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS fiscal_status VARCHAR(24) NOT NULL DEFAULT 'pending' AFTER seo_description",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS fiscal_ncm CHAR(8) NULL AFTER fiscal_status",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS fiscal_reference_url VARCHAR(1000) NULL AFTER fiscal_ncm",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS merchant_identifier_status VARCHAR(24) NOT NULL DEFAULT 'unknown' AFTER fiscal_reference_url",
+        "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS fiscal_json JSON NULL AFTER merchant_identifier_status",
+        "ALTER TABLE galatic_contact_messages ADD COLUMN IF NOT EXISTS admin_notes TEXT NULL AFTER message",
+        "ALTER TABLE galatic_customers ADD COLUMN IF NOT EXISTS status VARCHAR(24) NOT NULL DEFAULT 'active' AFTER newsletter_status",
       ]) await pool.query(alteration);
 
       // A loja Galatic já possuía um catálogo operacional na tabela `products`
@@ -285,7 +335,7 @@ export function createGalaticMySqlStore(databaseUrl) {
         heightCm: row.height_cm === null ? null : Number(row.height_cm),
       }));
     },
-    async prepareOrder({ key, fingerprint, items, quoteId, buyer, paymentMethod = "pix", installments = 1 }) {
+    async prepareOrder({ key, fingerprint, items, quoteId, buyer, paymentMethod = "pix", installments = 1, couponCode = null }) {
       await ensureSchema();
       const connection = await pool.getConnection();
       try {
@@ -337,12 +387,30 @@ export function createGalaticMySqlStore(databaseUrl) {
         const subtotalCents = lines.reduce((sum, line) => sum + Number(line.product.unit_amount_cents) * line.quantity, 0);
         const shippingCents = Number(quote.amount_cents);
         const [[matchedCustomer]] = await connection.query("SELECT id FROM galatic_customers WHERE email=?", [buyer.email]);
+        let discountCents = 0; let normalizedCoupon = null;
+        if (couponCode) {
+          normalizedCoupon = String(couponCode).trim().toUpperCase();
+          const [[coupon]] = await connection.query("SELECT * FROM galatic_coupons WHERE code=? AND active=1 FOR UPDATE", [normalizedCoupon]);
+          if (!coupon || Number(coupon.minimum_cents) > subtotalCents || (coupon.usage_limit !== null && Number(coupon.used_count) >= Number(coupon.usage_limit))) {
+            throw Object.assign(new Error("invalid_coupon"), { code: "invalid_coupon" });
+          }
+          const [[usage]] = await connection.query(
+            "SELECT COUNT(*) total FROM galatic_orders WHERE buyer_email=? AND coupon_code=? AND coupon_redeemed=1", [buyer.email, normalizedCoupon],
+          );
+          if (Number(usage.total) >= Number(coupon.per_customer_limit)) throw Object.assign(new Error("coupon_limit_reached"), { code: "invalid_coupon" });
+          discountCents = coupon.discount_type === "percent"
+            ? Math.floor(subtotalCents * Math.min(100, Number(coupon.discount_value)) / 100)
+            : Math.min(subtotalCents, Number(coupon.discount_value));
+        }
+        const totalCents = subtotalCents - discountCents + shippingCents;
+        if (totalCents < 50) throw Object.assign(new Error("checkout_below_minimum"), { code: "invalid_coupon" });
         await connection.query(
           `INSERT INTO galatic_orders
            (id,customer_id,payment_provider,payment_status,payment_method,installments,buyer_email,buyer_name,buyer_document,buyer_phone,shipping_address_json,
-            shipping_quote_id,subtotal_cents,shipping_cents,total_cents)
-           VALUES (?,?,'asaas','pending',?,?,?,?,?,?,?,?,?,?,?)`,
-          [orderId, matchedCustomer?.id ?? null, paymentMethod, installments, buyer.email, buyer.name, buyer.document, buyer.phone, JSON.stringify(buyer.address), quoteId, subtotalCents, shippingCents, subtotalCents + shippingCents],
+            shipping_quote_id,subtotal_cents,shipping_cents,discount_cents,coupon_code,total_cents)
+           VALUES (?,?,'asaas','pending',?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [orderId, matchedCustomer?.id ?? null, paymentMethod, installments, buyer.email, buyer.name, buyer.document, buyer.phone,
+            JSON.stringify(buyer.address), quoteId, subtotalCents, shippingCents, discountCents, normalizedCoupon, totalCents],
         );
         for (const line of lines) {
           const lineTotal = Number(line.product.unit_amount_cents) * line.quantity;
@@ -358,7 +426,7 @@ export function createGalaticMySqlStore(databaseUrl) {
         await connection.query("UPDATE galatic_shipping_quotes SET status='consumed' WHERE id=?", [quoteId]);
         await connection.query("UPDATE galatic_checkout_attempts SET order_id=? WHERE idempotency_key=?", [orderId, key]);
         await connection.commit();
-        return { kind: "created", order: { id: orderId, subtotalCents, shippingCents, totalCents: subtotalCents + shippingCents, serviceName: quote.service_name, lines: lines.map((line) => ({ sku: line.product.sku, title: line.product.title, quantity: line.quantity, unitAmountCents: Number(line.product.unit_amount_cents) })) } };
+        return { kind: "created", order: { id: orderId, subtotalCents, shippingCents, discountCents, couponCode: normalizedCoupon, totalCents, serviceName: quote.service_name, lines: lines.map((line) => ({ sku: line.product.sku, title: line.product.title, quantity: line.quantity, unitAmountCents: Number(line.product.unit_amount_cents) })) } };
       } catch (error) {
         await connection.rollback();
         throw error;
@@ -366,13 +434,24 @@ export function createGalaticMySqlStore(databaseUrl) {
     },
     async attachPayment(orderId, providerOrderId, status, details = {}) {
       await ensureSchema();
-      await pool.query(
-        `UPDATE galatic_orders SET payment_provider_order_id=?,payment_status=?,payment_method=?,installments=?,
-         installment_amount_cents=?,payment_fee_cents=?,payment_provider_group_id=?,total_cents=COALESCE(?,total_cents),
-         paid_at=CASE WHEN ?='paid' THEN UTC_TIMESTAMP(3) ELSE paid_at END WHERE id=?`,
-        [providerOrderId, status, details.method ?? "pix", details.installments ?? 1,
-          details.installmentAmountCents ?? null, details.paymentFeeCents ?? 0, details.providerGroupId ?? null, details.totalCents ?? null, status, orderId],
-      );
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        await connection.query(
+          `UPDATE galatic_orders SET payment_provider_order_id=?,payment_status=?,payment_method=?,installments=?,
+           installment_amount_cents=?,payment_fee_cents=?,payment_provider_group_id=?,total_cents=COALESCE(?,total_cents),
+           paid_at=CASE WHEN ?='paid' THEN UTC_TIMESTAMP(3) ELSE paid_at END WHERE id=?`,
+          [providerOrderId, status, details.method ?? "pix", details.installments ?? 1,
+            details.installmentAmountCents ?? null, details.paymentFeeCents ?? 0, details.providerGroupId ?? null, details.totalCents ?? null, status, orderId],
+        );
+        const [[order]] = await connection.query("SELECT coupon_code,coupon_redeemed FROM galatic_orders WHERE id=? FOR UPDATE", [orderId]);
+        if (status === "paid" && order?.coupon_code && !order.coupon_redeemed) {
+          await connection.query("UPDATE galatic_coupons SET used_count=used_count+1 WHERE code=?", [order.coupon_code]);
+          await connection.query("UPDATE galatic_orders SET coupon_redeemed=1 WHERE id=?", [orderId]);
+        }
+        await connection.commit();
+      } catch (error) { await connection.rollback(); throw error; }
+      finally { connection.release(); }
     },
     async completeCheckoutAttempt(key, response) {
       await ensureSchema();
@@ -441,7 +520,7 @@ export function createGalaticMySqlStore(databaseUrl) {
           }
         }
         const [[order]] = await connection.query(
-          `SELECT id,payment_status FROM galatic_orders
+          `SELECT id,payment_status,coupon_code,coupon_redeemed FROM galatic_orders
            WHERE payment_provider=? AND payment_provider_order_id=? FOR UPDATE`,
           [provider, providerOrderId],
         );
@@ -464,6 +543,14 @@ export function createGalaticMySqlStore(databaseUrl) {
              WHERE id=?`,
             [resolvedStatus, resolvedStatus, resolvedStatus, resolvedStatus, order.id],
           );
+          if (resolvedStatus === "paid" && previousStatus !== "paid" && order.coupon_code && !order.coupon_redeemed) {
+            await connection.query("UPDATE galatic_coupons SET used_count=used_count+1 WHERE code=?", [order.coupon_code]);
+            await connection.query("UPDATE galatic_orders SET coupon_redeemed=1 WHERE id=?", [order.id]);
+          }
+          if (["refunded","chargeback"].includes(resolvedStatus) && order.coupon_code && order.coupon_redeemed) {
+            await connection.query("UPDATE galatic_coupons SET used_count=GREATEST(used_count-1,0) WHERE code=?", [order.coupon_code]);
+            await connection.query("UPDATE galatic_orders SET coupon_redeemed=0 WHERE id=?", [order.id]);
+          }
         }
         await connection.commit();
         return {
@@ -730,6 +817,238 @@ export function createGalaticMySqlStore(databaseUrl) {
     async getCatalogProduct(slug) {
       const products = await this.listCatalogProducts();
       return products.find((product) => product.slug === slug || product.sku === String(slug).toUpperCase()) ?? null;
+    },
+    async getAdminByEmail(email, { includePassword = false } = {}) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT id,name,email,role,status,last_login_at,created_at${includePassword ? ",password_hash" : ""}
+         FROM galatic_admin_users WHERE email=?`, [email],
+      );
+      return row ?? null;
+    },
+    async createInitialAdmin({ name, email, passwordHash }) {
+      await ensureSchema();
+      const id = randomUUID();
+      await pool.query(
+        `INSERT INTO galatic_admin_users (id,name,email,password_hash,role,status)
+         VALUES (?,?,?,?, 'owner','active') ON DUPLICATE KEY UPDATE email=VALUES(email)`,
+        [id, name, email, passwordHash],
+      );
+      return this.getAdminByEmail(email);
+    },
+    async createAdminSession({ adminId, tokenHash, expiresAt }) {
+      await ensureSchema();
+      await pool.query("INSERT INTO galatic_admin_sessions (id,admin_id,token_hash,expires_at) VALUES (?,?,?,?)",
+        [randomUUID(), adminId, tokenHash, expiresAt]);
+      await pool.query("UPDATE galatic_admin_users SET last_login_at=NOW(3) WHERE id=?", [adminId]);
+    },
+    async adminForSession(sessionTokenHash) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT a.id,a.name,a.email,a.role,a.status,a.last_login_at,s.id session_id
+         FROM galatic_admin_sessions s JOIN galatic_admin_users a ON a.id=s.admin_id
+         WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>NOW(3) AND a.status='active'`, [sessionTokenHash],
+      );
+      return row ?? null;
+    },
+    async revokeAdminSession(sessionTokenHash) {
+      await ensureSchema();
+      await pool.query("UPDATE galatic_admin_sessions SET revoked_at=NOW(3) WHERE token_hash=?", [sessionTokenHash]);
+    },
+    async adminDashboard() {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT COUNT(*) orders_today,
+          COALESCE(SUM(CASE WHEN payment_status='paid' THEN total_cents ELSE 0 END),0) revenue_today,
+          SUM(CASE WHEN payment_status='paid' AND fulfillment_status NOT IN ('delivered','returned','canceled') THEN 1 ELSE 0 END) pending_shipments
+         FROM galatic_orders WHERE created_at>=UTC_DATE()`,
+      );
+      return { orders_today: Number(row.orders_today), revenue_today: Number(row.revenue_today), pending_shipments: Number(row.pending_shipments) };
+    },
+    async adminListProducts() {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT sku,slug,title name,description,image_url,source_url,category_name category,brand,
+          unit_amount_cents unit_amount,cost_amount_cents cost_amount,currency,active,manage_stock,
+          stock_quantity,0 reserved_quantity,weight_grams,length_cm,width_cm,height_cm,editorial_status,updated_at
+         FROM galatic_products ORDER BY title`,
+      );
+      return rows.map((row) => ({ ...row, unit_amount: Number(row.unit_amount), cost_amount: row.cost_amount === null ? null : Number(row.cost_amount),
+        active: Number(row.active), manage_stock: Number(row.manage_stock), stock_quantity: row.stock_quantity === null ? null : Number(row.stock_quantity), reserved_quantity: 0 }));
+    },
+    async adminUpsertProduct(product, { create = false } = {}) {
+      await ensureSchema();
+      if (create) {
+        await pool.query(
+          `INSERT INTO galatic_products
+           (sku,slug,title,description,image_url,source_url,category_name,brand,unit_amount_cents,cost_amount_cents,
+            active,manage_stock,stock_quantity,weight_grams,length_cm,width_cm,height_cm,editorial_status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [product.sku, product.slug, product.name, product.description || null, product.imageUrl || null, product.sourceUrl || null,
+            product.category || null, product.brand || null, product.unitAmount, product.costAmount, product.active ? 1 : 0,
+            product.manageStock ? 1 : 0, product.stockQuantity, product.weightGrams, product.lengthCm, product.widthCm,
+            product.heightCm, product.editorialStatus || "draft"],
+        );
+      } else {
+        const [result] = await pool.query(
+          `UPDATE galatic_products SET slug=?,title=?,description=?,image_url=?,source_url=?,category_name=?,brand=?,
+           unit_amount_cents=?,cost_amount_cents=?,active=?,manage_stock=?,stock_quantity=?,weight_grams=?,length_cm=?,
+           width_cm=?,height_cm=?,editorial_status=? WHERE sku=?`,
+          [product.slug, product.name, product.description || null, product.imageUrl || null, product.sourceUrl || null,
+            product.category || null, product.brand || null, product.unitAmount, product.costAmount, product.active ? 1 : 0,
+            product.manageStock ? 1 : 0, product.stockQuantity, product.weightGrams, product.lengthCm, product.widthCm,
+            product.heightCm, product.editorialStatus || "draft", product.sku],
+        );
+        if (!result.affectedRows) return false;
+      }
+      return true;
+    },
+    async adminBulkLogistics(products) {
+      await ensureSchema();
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        for (const product of products) {
+          const [result] = await connection.query(
+            `UPDATE galatic_products SET weight_grams=?,length_cm=?,width_cm=?,height_cm=?,stock_quantity=? WHERE sku=?`,
+            [product.weight_grams, product.length_cm, product.width_cm, product.height_cm, product.stock_quantity, product.sku],
+          );
+          if (!result.affectedRows) throw Object.assign(new Error("unknown_product"), { code: "unknown_product" });
+        }
+        await connection.commit();
+      } catch (error) { await connection.rollback(); throw error; }
+      finally { connection.release(); }
+      return products.length;
+    },
+    async adminListOrders() {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT id order_number,buyer_name customer_name,buyer_email customer_email,total_cents total,'BRL' currency,
+          payment_status,fulfillment_status shipping_status,created_at FROM galatic_orders ORDER BY created_at DESC LIMIT 500`,
+      );
+      return rows.map((row) => ({ ...row, total: Number(row.total) }));
+    },
+    async adminOrder(orderId) {
+      await ensureSchema();
+      const [[order]] = await pool.query(
+        `SELECT id order_number,buyer_name customer_name,buyer_email customer_email,payment_status,
+          fulfillment_status status,fulfillment_status shipping_status,total_cents total,'BRL' currency,
+          payment_provider,payment_provider_order_id provider_order_id,payment_method provider_payment_method,
+          'envia' shipping_provider,'pending' fiscal_status,tracking_code,created_at
+         FROM galatic_orders WHERE id=?`, [orderId],
+      );
+      if (!order) return null;
+      const [items] = await pool.query(
+        `SELECT sku,title name,quantity,total_amount_cents total FROM galatic_order_items WHERE order_id=? ORDER BY id`, [orderId],
+      );
+      const [tracking] = await pool.query(
+        `SELECT status,tracking_code,description,created_at FROM galatic_tracking_events WHERE order_id=? ORDER BY created_at`, [orderId],
+      );
+      return { order: { ...order, total: Number(order.total), shipping_service_name: "Entrega via Envia" },
+        items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })), shipments: tracking };
+    },
+    async adminUpdateShipping(orderId, { status, trackingCode = null, description = null }) {
+      await ensureSchema();
+      const [result] = await pool.query(
+        "UPDATE galatic_orders SET fulfillment_status=?,tracking_code=COALESCE(?,tracking_code) WHERE id=? AND payment_status='paid'",
+        [status, trackingCode, orderId],
+      );
+      if (!result.affectedRows) return false;
+      await pool.query("INSERT INTO galatic_tracking_events (order_id,status,tracking_code,description) VALUES (?,?,?,?)",
+        [orderId, status, trackingCode, description]);
+      return true;
+    },
+    async adminListCustomers() {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT c.id,CONCAT(c.first_name,' ',c.last_name) name,c.email,c.phone,c.status,c.email_verified_at,
+          COUNT(o.id) orders_count,COALESCE(SUM(CASE WHEN o.payment_status='paid' THEN o.total_cents ELSE 0 END),0) total_spent,c.created_at
+         FROM galatic_customers c LEFT JOIN galatic_orders o ON o.customer_id=c.id GROUP BY c.id ORDER BY c.created_at DESC`,
+      );
+      return rows.map((row) => ({ ...row, orders_count: Number(row.orders_count), total_spent: Number(row.total_spent) }));
+    },
+    async adminCustomer(customerId) {
+      await ensureSchema();
+      const [[customer]] = await pool.query(
+        `SELECT id,CONCAT(first_name,' ',last_name) name,email,phone,status,email_verified_at,marketing_consent,created_at
+         FROM galatic_customers WHERE id=?`, [customerId],
+      );
+      if (!customer) return null;
+      const [orders] = await pool.query("SELECT id order_number,payment_status,total_cents total,created_at FROM galatic_orders WHERE customer_id=? ORDER BY created_at DESC", [customerId]);
+      return { customer, orders: orders.map((row) => ({ ...row, total: Number(row.total) })) };
+    },
+    async adminUpdateCustomerStatus(customerId, status) {
+      await ensureSchema();
+      const [result] = await pool.query("UPDATE galatic_customers SET status=? WHERE id=?", [status, customerId]);
+      if (status !== "active") await pool.query("UPDATE galatic_customer_sessions SET revoked_at=NOW(3) WHERE customer_id=? AND revoked_at IS NULL", [customerId]);
+      return result.affectedRows > 0;
+    },
+    async adminListContacts() {
+      await ensureSchema();
+      const [rows] = await pool.query("SELECT id,name,email,subject,message,status,admin_notes,created_at FROM galatic_contact_messages ORDER BY created_at DESC LIMIT 500");
+      return rows;
+    },
+    async adminContact(id) {
+      await ensureSchema(); const [[row]] = await pool.query("SELECT id,name,email,subject,message,status,admin_notes,created_at FROM galatic_contact_messages WHERE id=?", [id]); return row ?? null;
+    },
+    async adminUpdateContact(id, status, notes) {
+      await ensureSchema(); const [result] = await pool.query("UPDATE galatic_contact_messages SET status=?,admin_notes=? WHERE id=?", [status, notes || null, id]); return result.affectedRows > 0;
+    },
+    async adminListCoupons() {
+      await ensureSchema(); const [rows] = await pool.query("SELECT code,description,discount_type,discount_value,minimum_cents minimum_subtotal,usage_limit,per_customer_limit,used_count usage_count,active,created_at FROM galatic_coupons ORDER BY created_at DESC"); return rows;
+    },
+    async adminCreateCoupon(coupon) {
+      await ensureSchema(); await pool.query("INSERT INTO galatic_coupons (code,description,discount_type,discount_value,minimum_cents,usage_limit,per_customer_limit,active) VALUES (?,?,?,?,?,?,?,1)", [coupon.code,coupon.description||null,coupon.type,coupon.value,coupon.minimum,coupon.limit,coupon.perCustomer]);
+    },
+    async adminUpdateCoupon(code, coupon) {
+      await ensureSchema(); const [result] = await pool.query("UPDATE galatic_coupons SET description=?,discount_type=?,discount_value=?,minimum_cents=?,usage_limit=?,per_customer_limit=?,active=? WHERE code=?", [coupon.description||null,coupon.type,coupon.value,coupon.minimum,coupon.limit,coupon.perCustomer,coupon.active?1:0,code]); return result.affectedRows>0;
+    },
+    async adminContentFiscal() {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT sku,title name,brand,image_url,editorial_status content_status,seo_title,seo_description,
+          fiscal_status,fiscal_ncm,fiscal_reference_url,merchant_identifier_status,fiscal_json,
+          weight_grams,length_cm,width_cm,height_cm,active
+         FROM galatic_products ORDER BY title`,
+      );
+      const products = rows.map((row) => {
+        const fiscal = typeof row.fiscal_json === "string" ? JSON.parse(row.fiscal_json || "{}") : (row.fiscal_json || {});
+        const contentReady = String(row.seo_title || "").length >= 20 && String(row.seo_description || "").length >= 70;
+        const logisticsReady = [row.weight_grams,row.length_cm,row.width_cm,row.height_cm].every((value) => Number(value) > 0);
+        const merchantReady = Boolean(row.active && contentReady && row.fiscal_status === "verified" && logisticsReady
+          && (row.merchant_identifier_status === "none" || fiscal.gtin));
+        return { ...row, fiscal_json: undefined, fiscal, content_ready: contentReady, logistics_ready: logisticsReady,
+          merchant_ready: merchantReady, merchant: { ready: merchantReady, identifier_status: row.merchant_identifier_status } };
+      });
+      return { products, summary: { total: products.length,
+        content_approved: products.filter((row) => row.content_status === "approved" && row.content_ready).length,
+        fiscal_verified: products.filter((row) => row.fiscal_status === "verified").length,
+        logistics_ready: products.filter((row) => row.logistics_ready).length,
+        merchant_ready: products.filter((row) => row.merchant_ready).length } };
+    },
+    async adminUpdateContentFiscal(sku, values) {
+      await ensureSchema();
+      const [result] = await pool.query(
+        `UPDATE galatic_products SET seo_title=?,seo_description=?,editorial_status=?,fiscal_status=?,fiscal_ncm=?,
+          fiscal_reference_url=?,merchant_identifier_status=?,fiscal_json=? WHERE sku=?`,
+        [values.seoTitle || null,values.seoDescription || null,values.contentStatus,values.fiscalStatus,values.ncm || null,
+          values.referenceUrl || null,values.identifierStatus,JSON.stringify(values.fiscal),sku],
+      );
+      return result.affectedRows > 0;
+    },
+    async adminCreateEmail({ recipient, subject, template, message }) {
+      await ensureSchema(); const id = randomUUID();
+      await pool.query("INSERT INTO galatic_admin_emails (id,recipient,subject,template_key,message) VALUES (?,?,?,?,?)", [id,recipient,subject,template,message]);
+      return id;
+    },
+    async adminFinishEmail(id, status, errorMessage = null) {
+      await ensureSchema(); await pool.query("UPDATE galatic_admin_emails SET status=?,error_message=?,sent_at=CASE WHEN ?='sent' THEN NOW(3) ELSE sent_at END WHERE id=?", [status,errorMessage,status,id]);
+    },
+    async adminListEmails(status = "") {
+      await ensureSchema();
+      const [rows] = status ? await pool.query("SELECT id,recipient,subject,template_key template,status,error_message,created_at,sent_at FROM galatic_admin_emails WHERE status=? ORDER BY created_at DESC LIMIT 200", [status])
+        : await pool.query("SELECT id,recipient,subject,template_key template,status,error_message,created_at,sent_at FROM galatic_admin_emails ORDER BY created_at DESC LIMIT 200");
+      return rows;
     },
     async close() { await pool.end(); },
   };

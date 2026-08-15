@@ -63,5 +63,13 @@ export function createGalaticNotifications(source = process.env) {
         `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>O pagamento do pedido <strong>${escapeHtml(orderId)}</strong> foi confirmado. Agora começaremos a preparação para envio.</p>`,
         { label: "Ver meu pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
     },
+    previewCustom({ subject, message }) {
+      const body = `<p>${escapeHtml(message).replace(/\r?\n/g, "<br>")}</p>`;
+      return document(subject, subject, body);
+    },
+    sendCustom({ recipient, subject, message }) {
+      const body = `<p>${escapeHtml(message).replace(/\r?\n/g, "<br>")}</p>`;
+      return send(recipient, subject, document(subject, subject, body));
+    },
   });
 }
