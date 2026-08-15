@@ -300,7 +300,9 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       stock_not_managed: products.filter((item) => item.active === 1 && item.manage_stock !== 1).length };
     const checks = [
       { key: "database", label: "Banco Galatic isolado", required: true, passed: true },
-      { key: "checkout", label: "Asaas sandbox/produção configurado", required: true, passed: Boolean(environment.checkoutEnabled) },
+      { key: "checkout", label: "Asaas configurado", required: true, passed: Boolean(environment.checkoutEnabled) },
+      { key: "payment_environment", label: "Asaas em ambiente de produção", required: true,
+        passed: environment.asaasEnvironment === "production" },
       { key: "payment_maintenance", label: "Expiração segura de reservas abandonadas", required: true,
         passed: Boolean(environment.galaticPaymentMaintenanceEnabled) },
       { key: "shipping", label: "Envia e origem de postagem", required: true, passed: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin) },
@@ -309,7 +311,17 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       { key: "catalog", label: "Catálogo com logística completa", required: true, passed: catalog.active_products > 0 && catalog.missing_weight === 0 && catalog.missing_dimensions === 0 },
       { key: "email", label: "E-mail transacional", required: true, passed: Boolean(notifications?.ready) },
     ];
-    return response.json({ production_ready: checks.every((item) => item.passed), checkout_enabled: Boolean(environment.checkoutEnabled), checks, catalog });
+    const sandboxReady = checks
+      .filter((item) => item.key !== "payment_environment")
+      .every((item) => item.passed);
+    return response.json({
+      production_ready: checks.every((item) => item.passed),
+      sandbox_ready: sandboxReady,
+      payment_environment: environment.asaasEnvironment,
+      checkout_enabled: Boolean(environment.checkoutEnabled),
+      checks,
+      catalog,
+    });
   });
   const emailTemplates = [
     { key: "customer_service", label: "Atendimento ao cliente", subject: "Atendimento Galatic", message: "Olá!\n\nEstamos entrando em contato sobre sua solicitação.\n\nEquipe Galatic" },

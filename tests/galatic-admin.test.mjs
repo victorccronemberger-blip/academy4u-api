@@ -53,6 +53,59 @@ test("protects the existing Galatic admin panel with an opaque API session", asy
   assert.equal(foreignOrigin.status, 403);
 });
 
+test("does not declare production readiness while Galatic payments are still in sandbox", async (context) => {
+  const baseEnvironment = {
+    ASAAS_ENABLED: "true", PAYMENT_TENANTS: "galatic",
+    GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
+    GALATIC_DATABASE_URL: "mysql://galatic:test@127.0.0.1/galatic",
+    GALATIC_ENVIA_API_KEY: "envia_test", GALATIC_ENVIA_ENVIRONMENT: "production",
+    GALATIC_ENVIA_WEBHOOK_TOKEN: "envia-webhook-token",
+    GALATIC_SHIPPING_NAME: "Galatic Games", GALATIC_SHIPPING_EMAIL: "comercial@galatic.com.br",
+    GALATIC_SHIPPING_PHONE: "15997671749", GALATIC_SHIPPING_STREET: "Avenida Franz Voegeli",
+    GALATIC_SHIPPING_NUMBER: "501", GALATIC_SHIPPING_DISTRICT: "Parque Continental",
+    GALATIC_SHIPPING_CITY: "Osasco", GALATIC_SHIPPING_STATE: "SP",
+    GALATIC_SHIPPING_POSTAL_CODE: "06020190", GALATIC_SHIPPING_TAX_ID: "67956916000190",
+  };
+  const products = [{ active: 1, weight_grams: 500, length_cm: 20, width_cm: 15, height_cm: 6, manage_stock: 0 }];
+  async function readinessFor(asaasEnvironment) {
+    const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
+      adminListProducts: async () => products,
+    });
+    const { app } = createApp({
+      ...baseEnvironment,
+      ASAAS_ENVIRONMENT: asaasEnvironment,
+      ASAAS_SANDBOX: "$aact_sandbox_key",
+      ASAAS_API_KEY: "$aact_production_key",
+      ASAAS_SANDBOX_WEBHOOK_TOKEN: "sandbox-webhook-token",
+      ASAAS_WEBHOOK_TOKEN: "production-webhook-token",
+    }, {
+      stores: { galatic: store },
+      asaasClient: {}, enviaClient: {},
+      galaticNotifications: { ready: true, provider: "hostinger-mail-api" },
+    });
+    const server = app.listen(0, "127.0.0.1");
+    context.after(() => server.close());
+    await new Promise((resolve) => server.once("listening", resolve));
+    const authenticated = await login(server);
+    const response = await fetch(`${authenticated.base}/readiness`, {
+      headers: { origin: "https://galatic.com.br", authorization: `Bearer ${authenticated.credentials.access_token}` },
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  }
+
+  const sandbox = await readinessFor("sandbox");
+  assert.equal(sandbox.sandbox_ready, true);
+  assert.equal(sandbox.production_ready, false);
+  assert.equal(sandbox.payment_environment, "sandbox");
+  assert.equal(sandbox.checks.find((item) => item.key === "payment_environment").passed, false);
+
+  const production = await readinessFor("production");
+  assert.equal(production.sandbox_ready, true);
+  assert.equal(production.production_ready, true);
+  assert.equal(production.payment_environment, "production");
+});
+
 test("cancels an unpaid Asaas charge before releasing the Galatic order", async (context) => {
   const calls = [];
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
