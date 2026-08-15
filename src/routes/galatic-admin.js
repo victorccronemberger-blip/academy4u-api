@@ -98,7 +98,22 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     catch (error) { return response.status(error?.code === "invalid_product" ? 400 : 409).json({ error: error?.code ?? "product_conflict", message: error.message }); }
   });
   router.patch("/products/:sku", async (request, response) => {
-    try { const product = productInput(request.body, request.params.sku); const updated = await store.adminUpsertProduct(product); return updated ? response.json({ product }) : response.status(404).json({ error: "product_not_found" }); }
+    try {
+      const current = (await store.adminListProducts()).find((item) => item.sku === clean(request.params.sku, 80).toUpperCase());
+      if (!current) return response.status(404).json({ error: "product_not_found" });
+      const merged = { ...current, ...request.body, slug: request.body?.slug ?? current.slug,
+        name: request.body?.name ?? current.name, unit_amount: request.body?.unit_amount ?? current.unit_amount,
+        cost_amount: request.body?.cost_amount !== undefined ? request.body.cost_amount : current.cost_amount,
+        image_url: request.body?.image_url !== undefined ? request.body.image_url : current.image_url,
+        source_url: request.body?.source_url !== undefined ? request.body.source_url : current.source_url,
+        category: request.body?.category !== undefined ? request.body.category : current.category,
+        brand: request.body?.brand !== undefined ? request.body.brand : current.brand,
+        active: request.body?.active !== undefined ? request.body.active : current.active,
+        manage_stock: request.body?.manage_stock !== undefined ? request.body.manage_stock : current.manage_stock,
+        stock_quantity: request.body?.stock_quantity !== undefined ? request.body.stock_quantity : current.stock_quantity };
+      const product = productInput(merged, request.params.sku); const updated = await store.adminUpsertProduct(product);
+      return updated ? response.json({ product }) : response.status(404).json({ error: "product_not_found" });
+    }
     catch (error) { return response.status(400).json({ error: error?.code ?? "invalid_product", message: error.message }); }
   });
   router.post("/products/bulk-logistics", async (request, response) => {
@@ -185,11 +200,26 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     return updated ? response.json({ updated: true }) : response.status(404).json({ error: "product_not_found" });
   });
   router.get("/integrations", (_request, response) => response.json({ integrations: {
-    database: true, asaas: Boolean(environment.checkoutEnabled), envia: Boolean(environment.galaticEnviaApiKey),
-    shipping_origin: Boolean(environment.galaticShippingOrigin), email: Boolean(notifications?.ready),
+    database: { configured: true, service: "MySQL Galatic isolado" },
+    asaas: { configured: Boolean(environment.checkoutEnabled), mode: environment.asaasEnvironment, service: "Pix e cartão" },
+    correios: { configured: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin), service: "Envia" },
+    mail: { configured: Boolean(notifications?.ready), service: "SMTP Galatic" },
   } }));
-  router.get("/readiness", (_request, response) => response.json({ ready: Boolean(environment.checkoutEnabled && environment.galaticEnviaApiKey && environment.galaticShippingOrigin && notifications?.ready),
-    checks: { checkout: Boolean(environment.checkoutEnabled), shipping: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin), email: Boolean(notifications?.ready) } }));
+  router.get("/readiness", async (_request, response) => {
+    const products = await store.adminListProducts();
+    const catalog = { active_products: products.filter((item) => item.active === 1).length,
+      missing_weight: products.filter((item) => item.active === 1 && !(Number(item.weight_grams) > 0)).length,
+      missing_dimensions: products.filter((item) => item.active === 1 && ![item.length_cm,item.width_cm,item.height_cm].every((value) => Number(value) > 0)).length,
+      stock_not_managed: products.filter((item) => item.active === 1 && item.manage_stock !== 1).length };
+    const checks = [
+      { key: "database", label: "Banco Galatic isolado", required: true, passed: true },
+      { key: "checkout", label: "Asaas sandbox/produção configurado", required: true, passed: Boolean(environment.checkoutEnabled) },
+      { key: "shipping", label: "Envia e origem de postagem", required: true, passed: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin) },
+      { key: "catalog", label: "Catálogo com logística completa", required: true, passed: catalog.active_products > 0 && catalog.missing_weight === 0 && catalog.missing_dimensions === 0 },
+      { key: "email", label: "E-mail transacional", required: true, passed: Boolean(notifications?.ready) },
+    ];
+    return response.json({ production_ready: checks.every((item) => item.passed), checkout_enabled: Boolean(environment.checkoutEnabled), checks, catalog });
+  });
   const emailTemplates = [
     { key: "customer_service", label: "Atendimento ao cliente", subject: "Atendimento Galatic", message: "Olá!\n\nEstamos entrando em contato sobre sua solicitação.\n\nEquipe Galatic" },
     { key: "order_update", label: "Atualização de pedido", subject: "Novidades sobre seu pedido Galatic", message: "Olá!\n\nTemos uma atualização sobre seu pedido.\n\nEquipe Galatic" },
