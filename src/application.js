@@ -8,20 +8,35 @@ import { requestContext } from "./http/request-context.js";
 import { jsonErrorHandler } from "./http/error-handler.js";
 import { createFixedWindowLimiter } from "./http/fixed-window-limiter.js";
 import { createAsaasClient } from "./integrations/asaas/client.js";
+import { createGalaticNotifications } from "./integrations/email/galatic-notifications.js";
 import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
 import { createCheckoutRouter } from "./routes/checkout.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createPublicCommerceRouter } from "./routes/public.js";
 import { createGalaticCheckoutRouter } from "./routes/galatic-checkout.js";
 import { createGalaticShippingRouter } from "./routes/galatic-shipping.js";
+import { createGalaticCustomerRouter } from "./routes/galatic-customer.js";
+import { createGalaticPublicRouter } from "./routes/galatic-public.js";
 import { createInstallmentService } from "./services/installment-service.js";
 import { createInMemoryStore } from "./store/in-memory-store.js";
 import { createGalaticMySqlStore } from "./store/galatic-mysql-store.js";
 import { createMySqlStore } from "./store/mysql-store.js";
 
-function createAccessCallbacks(tenant, store) {
+function createAccessCallbacks(tenant, store, notifications = null) {
   return {
     async onAccessGranted(orderId) {
+      if (tenant.id === "galatic") {
+        if (!notifications) return { granted: true, deliveries: 0 };
+        const order = typeof store.getOrderNotification === "function" ? await store.getOrderNotification(orderId) : null;
+        const claimed = order && typeof store.claimNotification === "function"
+          ? await store.claimNotification(`payment-confirmed:${orderId}`)
+          : Boolean(order);
+        if (claimed) notifications?.sendPaymentConfirmed?.(order).catch(async (error) => {
+          await store.releaseNotification?.(`payment-confirmed:${orderId}`).catch(() => {});
+          console.error("Could not send Galatic payment email", { type: error?.name, code: error?.code });
+        });
+        return { granted: true, deliveries: 0 };
+      }
       const result = typeof store.grantOrderAccess === "function"
         ? await store.grantOrderAccess(orderId)
         : { granted: true, deliveries: 0 };
@@ -73,6 +88,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   const environment = getEnvironment(source);
   const tenants = assertTenantIsolation(getTenantDefinitions(source, environment));
   const asaasClient = dependencies.asaasClient ?? createAsaasClient(environment);
+  const galaticNotifications = dependencies.galaticNotifications ?? createGalaticNotifications(source);
   const contexts = new Map();
 
   for (const tenant of tenants) {
@@ -98,7 +114,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     const readiness = { status: "connecting", error: null };
     let catalog = null;
     const productResolver = (slug) => catalog?.getCheckoutProduct(slug) ?? getCheckoutProduct(slug);
-    const callbacks = createAccessCallbacks(tenant, store);
+    const callbacks = createAccessCallbacks(tenant, store, galaticNotifications);
     const context = {
       tenant,
       environment: tenantEnvironment,
@@ -214,7 +230,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       if (!received || allowedOrigins.has(received)) return callback(null, true);
       return callback(null, false);
     },
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Accept", "Authorization", "Idempotency-Key", "asaas-access-token", "x-academy-trusted-token"],
     maxAge: 86_400,
   }));
@@ -239,6 +255,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     const platforms = Object.fromEntries([...contexts].map(([id, context]) => [id, {
       database: context.readiness.status,
       checkout: context.readiness.status === "ready" && environment.checkoutEnabled,
+      ...(id === "galatic" ? { transactionalEmail: Boolean(galaticNotifications?.ready) } : {}),
     }]));
     const available = Object.values(platforms).every((platform) => platform.database === "ready");
     response.status(available ? 200 : 503).json({
@@ -256,9 +273,17 @@ export function createApp(overrides = {}, dependencies = {}) {
         environment: context.environment,
         asaasClient,
         store: context.store,
+        notifications: galaticNotifications,
       }));
       app.use("/v1/galatic/quote", ...middleware, createGalaticShippingRouter(express, {
         environment: context.environment,
+        store: context.store,
+      }));
+      app.use("/v1/galatic", ...middleware, createGalaticCustomerRouter(express, {
+        store: context.store,
+        notifications: galaticNotifications,
+      }));
+      app.use("/v1/galatic", ...middleware, createGalaticPublicRouter(express, {
         store: context.store,
       }));
       app.use(`/health/${context.tenant.id}`, createHealthRouter(

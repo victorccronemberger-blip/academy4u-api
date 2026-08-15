@@ -118,6 +118,8 @@ export function createAsaasClient(environment, fetchImplementation = fetch) {
 
   return Object.freeze({
     verifyCredentials: () => requestWithRetry("/myAccount/accountNumber", { timeoutMs: 15_000 }),
+    getAccountFees: () => requestWithRetry("/myAccount/fees/", { timeoutMs: 15_000 }),
+    simulatePayment: (payload) => request("/payments/simulate", { method: "POST", body: payload, timeoutMs: 15_000 }),
     findCustomersByDocument: (cpfCnpj) => requestWithRetry(`/customers?cpfCnpj=${encodeURIComponent(cpfCnpj)}&limit=1`),
     createCustomer: (payload) => request("/customers", { method: "POST", body: payload }),
     createPayment: (payload) => request("/payments", { method: "POST", body: payload }),

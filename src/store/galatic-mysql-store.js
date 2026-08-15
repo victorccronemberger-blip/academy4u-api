@@ -10,6 +10,21 @@ function nextPaymentStatus(current, incoming) {
   return current === "paid" ? current : incoming;
 }
 
+function customerView(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    first_name: row.first_name,
+    last_name: row.last_name,
+    name: `${row.first_name} ${row.last_name}`.trim(),
+    email: row.email,
+    phone: row.phone ?? "",
+    email_verified: Boolean(row.email_verified_at),
+    marketing_consent: Boolean(row.marketing_consent),
+    created_at: row.created_at,
+  };
+}
+
 // This store is intentionally independent from the Academy/LMS schema.  It
 // owns physical-product data only; no runtime query may target courses,
 // settings, users, enrollments or any remote catalogue service.
@@ -99,8 +114,73 @@ export function createGalaticMySqlStore(databaseUrl) {
           occurred_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
           INDEX galatic_alerts_type_time (alert_type, occurred_at)
         )`,
+        `CREATE TABLE IF NOT EXISTS galatic_customers (
+          id CHAR(36) PRIMARY KEY, first_name VARCHAR(90) NOT NULL,
+          last_name VARCHAR(90) NOT NULL, email VARCHAR(160) NOT NULL UNIQUE,
+          phone VARCHAR(20) NULL, password_hash VARCHAR(255) NOT NULL,
+          email_verified_at DATETIME(3) NULL, marketing_consent TINYINT(1) NOT NULL DEFAULT 0,
+          newsletter_enabled TINYINT(1) NOT NULL DEFAULT 0,
+          newsletter_status VARCHAR(24) NOT NULL DEFAULT 'disabled',
+          created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+          INDEX galatic_customers_created (created_at)
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_customer_sessions (
+          id CHAR(36) PRIMARY KEY, customer_id CHAR(36) NOT NULL,
+          token_hash CHAR(64) NOT NULL UNIQUE, expires_at DATETIME(3) NOT NULL,
+          last_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          revoked_at DATETIME(3) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          INDEX galatic_sessions_customer (customer_id, revoked_at, expires_at),
+          CONSTRAINT galatic_sessions_customer_fk FOREIGN KEY (customer_id) REFERENCES galatic_customers(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_customer_tokens (
+          token_hash CHAR(64) PRIMARY KEY, customer_id CHAR(36) NOT NULL,
+          purpose VARCHAR(24) NOT NULL, expires_at DATETIME(3) NOT NULL,
+          consumed_at DATETIME(3) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          INDEX galatic_customer_tokens_lookup (customer_id, purpose, expires_at),
+          CONSTRAINT galatic_tokens_customer_fk FOREIGN KEY (customer_id) REFERENCES galatic_customers(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_customer_addresses (
+          id CHAR(36) PRIMARY KEY, customer_id CHAR(36) NOT NULL,
+          label VARCHAR(80) NOT NULL, recipient_name VARCHAR(180) NOT NULL,
+          federal_tax_id VARCHAR(14) NULL, postal_code CHAR(8) NOT NULL,
+          street VARCHAR(180) NOT NULL, number VARCHAR(30) NOT NULL,
+          complement VARCHAR(120) NULL, district VARCHAR(120) NOT NULL,
+          city VARCHAR(120) NOT NULL, state CHAR(2) NOT NULL,
+          is_default TINYINT(1) NOT NULL DEFAULT 0,
+          created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+          INDEX galatic_addresses_customer (customer_id, is_default),
+          CONSTRAINT galatic_addresses_customer_fk FOREIGN KEY (customer_id) REFERENCES galatic_customers(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_newsletter_subscribers (
+          email VARCHAR(160) PRIMARY KEY, status VARCHAR(24) NOT NULL DEFAULT 'active',
+          customer_id CHAR(36) NULL, consent_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_contact_messages (
+          id CHAR(36) PRIMARY KEY, customer_id CHAR(36) NULL, name VARCHAR(180) NOT NULL,
+          email VARCHAR(160) NOT NULL, subject VARCHAR(180) NOT NULL, message TEXT NOT NULL,
+          status VARCHAR(24) NOT NULL DEFAULT 'open', created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          INDEX galatic_contact_status_time (status, created_at)
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_notification_log (
+          notification_key VARCHAR(160) PRIMARY KEY, status VARCHAR(24) NOT NULL DEFAULT 'claimed',
+          created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+        )`,
       ];
       for (const statement of statements) await pool.query(statement);
+      for (const alteration of [
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS customer_id CHAR(36) NULL AFTER id",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(24) NOT NULL DEFAULT 'pix' AFTER payment_status",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS payment_provider_group_id VARCHAR(80) NULL AFTER payment_provider_order_id",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS installments TINYINT UNSIGNED NOT NULL DEFAULT 1 AFTER payment_method",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS installment_amount_cents INT UNSIGNED NULL AFTER installments",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS payment_fee_cents INT UNSIGNED NOT NULL DEFAULT 0 AFTER installment_amount_cents",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS discount_cents INT UNSIGNED NOT NULL DEFAULT 0 AFTER shipping_cents",
+        "ALTER TABLE galatic_orders ADD COLUMN IF NOT EXISTS paid_at DATETIME(3) NULL AFTER fulfillment_status",
+      ]) await pool.query(alteration);
 
       // A loja Galatic já possuía um catálogo operacional na tabela `products`
       // antes da consolidação do gateway. Na primeira inicialização, copie esse
@@ -205,7 +285,7 @@ export function createGalaticMySqlStore(databaseUrl) {
         heightCm: row.height_cm === null ? null : Number(row.height_cm),
       }));
     },
-    async prepareOrder({ key, fingerprint, items, quoteId, buyer }) {
+    async prepareOrder({ key, fingerprint, items, quoteId, buyer, paymentMethod = "pix", installments = 1 }) {
       await ensureSchema();
       const connection = await pool.getConnection();
       try {
@@ -256,12 +336,13 @@ export function createGalaticMySqlStore(databaseUrl) {
         const orderId = randomUUID();
         const subtotalCents = lines.reduce((sum, line) => sum + Number(line.product.unit_amount_cents) * line.quantity, 0);
         const shippingCents = Number(quote.amount_cents);
+        const [[matchedCustomer]] = await connection.query("SELECT id FROM galatic_customers WHERE email=?", [buyer.email]);
         await connection.query(
           `INSERT INTO galatic_orders
-           (id,payment_provider,payment_status,buyer_email,buyer_name,buyer_document,buyer_phone,shipping_address_json,
+           (id,customer_id,payment_provider,payment_status,payment_method,installments,buyer_email,buyer_name,buyer_document,buyer_phone,shipping_address_json,
             shipping_quote_id,subtotal_cents,shipping_cents,total_cents)
-           VALUES (?,'asaas','pending',?,?,?,?,?,?,?,?,?)`,
-          [orderId, buyer.email, buyer.name, buyer.document, buyer.phone, JSON.stringify(buyer.address), quoteId, subtotalCents, shippingCents, subtotalCents + shippingCents],
+           VALUES (?,?,'asaas','pending',?,?,?,?,?,?,?,?,?,?,?)`,
+          [orderId, matchedCustomer?.id ?? null, paymentMethod, installments, buyer.email, buyer.name, buyer.document, buyer.phone, JSON.stringify(buyer.address), quoteId, subtotalCents, shippingCents, subtotalCents + shippingCents],
         );
         for (const line of lines) {
           const lineTotal = Number(line.product.unit_amount_cents) * line.quantity;
@@ -283,11 +364,14 @@ export function createGalaticMySqlStore(databaseUrl) {
         throw error;
       } finally { connection.release(); }
     },
-    async attachPayment(orderId, providerOrderId, status) {
+    async attachPayment(orderId, providerOrderId, status, details = {}) {
       await ensureSchema();
       await pool.query(
-        "UPDATE galatic_orders SET payment_provider_order_id=?,payment_status=? WHERE id=?",
-        [providerOrderId, status, orderId],
+        `UPDATE galatic_orders SET payment_provider_order_id=?,payment_status=?,payment_method=?,installments=?,
+         installment_amount_cents=?,payment_fee_cents=?,payment_provider_group_id=?,total_cents=COALESCE(?,total_cents),
+         paid_at=CASE WHEN ?='paid' THEN UTC_TIMESTAMP(3) ELSE paid_at END WHERE id=?`,
+        [providerOrderId, status, details.method ?? "pix", details.installments ?? 1,
+          details.installmentAmountCents ?? null, details.paymentFeeCents ?? 0, details.providerGroupId ?? null, details.totalCents ?? null, status, orderId],
       );
     },
     async completeCheckoutAttempt(key, response) {
@@ -314,9 +398,9 @@ export function createGalaticMySqlStore(databaseUrl) {
     async getOrderByPublicId(orderId) {
       await ensureSchema();
       const [[row]] = await pool.query(
-        "SELECT id,payment_provider_order_id,payment_status,subtotal_cents,shipping_cents,total_cents,fulfillment_status FROM galatic_orders WHERE id=?", [orderId],
+        "SELECT id,payment_provider_order_id,payment_status,payment_method,installments,installment_amount_cents,subtotal_cents,shipping_cents,total_cents,fulfillment_status FROM galatic_orders WHERE id=?", [orderId],
       );
-      return row ? { id: row.id, providerOrderId: row.payment_provider_order_id, status: row.payment_status, subtotalCents: Number(row.subtotal_cents), shippingCents: Number(row.shipping_cents), totalCents: Number(row.total_cents), fulfillmentStatus: row.fulfillment_status } : null;
+      return row ? { id: row.id, providerOrderId: row.payment_provider_order_id, status: row.payment_status, method: row.payment_method, installments: Number(row.installments), installmentAmountCents: row.installment_amount_cents === null ? null : Number(row.installment_amount_cents), subtotalCents: Number(row.subtotal_cents), shippingCents: Number(row.shipping_cents), totalCents: Number(row.total_cents), fulfillmentStatus: row.fulfillment_status } : null;
     },
     async getOrderByProviderOrderId(provider, providerOrderId) {
       await ensureSchema();
@@ -324,6 +408,22 @@ export function createGalaticMySqlStore(databaseUrl) {
         "SELECT id,payment_provider_order_id,payment_status,subtotal_cents,shipping_cents,total_cents,fulfillment_status FROM galatic_orders WHERE payment_provider=? AND payment_provider_order_id=?", [provider, providerOrderId],
       );
       return row ? { id: row.id, providerOrderId: row.payment_provider_order_id, status: row.payment_status, subtotalCents: Number(row.subtotal_cents), shippingCents: Number(row.shipping_cents), totalCents: Number(row.total_cents), fulfillmentStatus: row.fulfillment_status } : null;
+    },
+    async getOrderNotification(orderId) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        "SELECT id,buyer_email email,buyer_name name,total_cents,payment_method FROM galatic_orders WHERE id=?", [orderId],
+      );
+      return row ? { orderId: row.id, email: row.email, name: row.name, totalCents: Number(row.total_cents), method: row.payment_method } : null;
+    },
+    async claimNotification(key) {
+      await ensureSchema();
+      const [result] = await pool.query("INSERT IGNORE INTO galatic_notification_log (notification_key) VALUES (?)", [String(key).slice(0, 160)]);
+      return result.affectedRows === 1;
+    },
+    async releaseNotification(key) {
+      await ensureSchema();
+      await pool.query("DELETE FROM galatic_notification_log WHERE notification_key=? AND status='claimed'", [String(key).slice(0, 160)]);
     },
     async updateOrderFromWebhook({ provider, providerOrderId, status, eventId }) {
       await ensureSchema();
@@ -356,13 +456,13 @@ export function createGalaticMySqlStore(databaseUrl) {
         }
         if (order) {
           await connection.query(
-            `UPDATE galatic_orders SET payment_status=?,
+            `UPDATE galatic_orders SET payment_status=?,paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at,UTC_TIMESTAMP(3)) ELSE paid_at END,
              fulfillment_status=CASE
                WHEN ?='paid' AND fulfillment_status='awaiting_payment' THEN 'paid'
                WHEN ? IN ('refunded','chargeback') THEN 'payment_reversed'
                ELSE fulfillment_status END
              WHERE id=?`,
-            [resolvedStatus, resolvedStatus, resolvedStatus, order.id],
+            [resolvedStatus, resolvedStatus, resolvedStatus, resolvedStatus, order.id],
           );
         }
         await connection.commit();
@@ -381,25 +481,255 @@ export function createGalaticMySqlStore(databaseUrl) {
     },
     async updatePaymentInstallmentFromWebhook({ provider, providerOrderId, providerGroupId, installment, eventId }) {
       await ensureSchema();
-      // A Galatic vende produto físico com Pix à vista; um webhook de parcela
-      // não faz parte do fluxo. Deduplica o evento e confirma o recebimento
-      // (sem tocar em pedidos) para o provedor parar de reenviar, registrando
-      // um alerta operacional em vez de falhar com 500.
-      if (eventId) {
-        const [result] = await pool.query(
-          "INSERT IGNORE INTO galatic_payment_events (event_id,provider,provider_order_id,status) VALUES (?,?,?,?)",
-          [eventId, provider, providerOrderId, installment?.status ?? "unknown"],
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        if (eventId) {
+          const [result] = await connection.query(
+            "INSERT IGNORE INTO galatic_payment_events (event_id,provider,provider_order_id,status) VALUES (?,?,?,?)",
+            [eventId, provider, providerOrderId, installment?.status ?? "unknown"],
+          );
+          if (result.affectedRows === 0) { await connection.rollback(); return { duplicate: true }; }
+        }
+        const [[order]] = await connection.query(
+          `SELECT id,payment_status FROM galatic_orders
+           WHERE payment_provider=? AND (payment_provider_group_id=? OR payment_provider_order_id=?) FOR UPDATE`,
+          [provider, providerGroupId, providerOrderId],
         );
-        if (result.affectedRows === 0) return { duplicate: true };
+        if (!order) {
+          await connection.commit();
+          return { duplicate: false, deferred: true };
+        }
+        const status = nextPaymentStatus(order.payment_status, installment?.status ?? "open");
+        await connection.query(
+          `UPDATE galatic_orders SET payment_status=?,paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at,UTC_TIMESTAMP(3)) ELSE paid_at END,
+           fulfillment_status=CASE WHEN ?='paid' AND fulfillment_status='awaiting_payment' THEN 'paid'
+           WHEN ? IN ('refunded','chargeback') THEN 'payment_reversed' ELSE fulfillment_status END WHERE id=?`,
+          [status, status, status, status, order.id],
+        );
+        await connection.commit();
+        return { duplicate: false, id: order.id, status, previousStatus: order.payment_status };
+      } catch (error) { await connection.rollback(); throw error; }
+      finally { connection.release(); }
+    },
+    async createCustomer({ firstName, lastName, email, phone, passwordHash, marketingConsent }) {
+      await ensureSchema();
+      const id = randomUUID();
+      try {
+        await pool.query(
+          `INSERT INTO galatic_customers
+           (id,first_name,last_name,email,phone,password_hash,marketing_consent,newsletter_enabled,newsletter_status)
+           VALUES (?,?,?,?,?,?,?,? ,?)`,
+          [id, firstName, lastName, email, phone || null, passwordHash, marketingConsent ? 1 : 0,
+            marketingConsent ? 1 : 0, marketingConsent ? "active" : "disabled"],
+        );
+      } catch (error) {
+        if (error?.code === "ER_DUP_ENTRY") throw Object.assign(new Error("Já existe uma conta com este e-mail."), { code: "email_exists" });
+        throw error;
       }
-      await recordOperationalAlert({
-        type: "unexpected_installment_webhook",
-        severity: "warning",
-        source: "asaas-webhook",
-        summary: "Webhook de parcela recebido para um pedido Galatic (Pix à vista).",
-        context: { providerOrderId, providerGroupId },
-      });
-      return { duplicate: false };
+      return this.getCustomerById(id);
+    },
+    async getCustomerByEmail(email, { includePassword = false } = {}) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT id,first_name,last_name,email,phone,email_verified_at,marketing_consent,created_at${includePassword ? ",password_hash" : ""}
+         FROM galatic_customers WHERE email=?`, [email],
+      );
+      return row ? { ...customerView(row), ...(includePassword ? { password_hash: row.password_hash } : {}) } : null;
+    },
+    async getCustomerById(id, { includePassword = false } = {}) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT id,first_name,last_name,email,phone,email_verified_at,marketing_consent,created_at${includePassword ? ",password_hash" : ""}
+         FROM galatic_customers WHERE id=?`, [id],
+      );
+      return row ? { ...customerView(row), ...(includePassword ? { password_hash: row.password_hash } : {}) } : null;
+    },
+    async createCustomerSession({ customerId, tokenHash, expiresAt }) {
+      await ensureSchema();
+      const id = randomUUID();
+      await pool.query(
+        "INSERT INTO galatic_customer_sessions (id,customer_id,token_hash,expires_at) VALUES (?,?,?,?)",
+        [id, customerId, tokenHash, expiresAt],
+      );
+      return id;
+    },
+    async customerForSession(tokenHash) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT c.id,c.first_name,c.last_name,c.email,c.phone,c.email_verified_at,c.marketing_consent,c.created_at,s.id session_id
+         FROM galatic_customer_sessions s JOIN galatic_customers c ON c.id=s.customer_id
+         WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>UTC_TIMESTAMP(3)`, [tokenHash],
+      );
+      if (!row) return null;
+      await pool.query("UPDATE galatic_customer_sessions SET last_seen_at=UTC_TIMESTAMP(3) WHERE id=?", [row.session_id]);
+      return { customer: customerView(row), sessionId: row.session_id };
+    },
+    async revokeCustomerSession(tokenHash) {
+      await ensureSchema();
+      await pool.query("UPDATE galatic_customer_sessions SET revoked_at=UTC_TIMESTAMP(3) WHERE token_hash=?", [tokenHash]);
+    },
+    async revokeOtherCustomerSessions(customerId, keepSessionId = null) {
+      await ensureSchema();
+      await pool.query(
+        `UPDATE galatic_customer_sessions SET revoked_at=UTC_TIMESTAMP(3)
+         WHERE customer_id=? AND revoked_at IS NULL AND (? IS NULL OR id<>?)`,
+        [customerId, keepSessionId, keepSessionId],
+      );
+    },
+    async updateCustomerProfile(customerId, { firstName, lastName, phone }) {
+      await ensureSchema();
+      await pool.query("UPDATE galatic_customers SET first_name=?,last_name=?,phone=? WHERE id=?", [firstName, lastName, phone || null, customerId]);
+      return this.getCustomerById(customerId);
+    },
+    async updateCustomerPassword(customerId, passwordHash) {
+      await ensureSchema();
+      await pool.query("UPDATE galatic_customers SET password_hash=? WHERE id=?", [passwordHash, customerId]);
+    },
+    async createCustomerToken({ customerId, purpose, tokenHash, expiresAt }) {
+      await ensureSchema();
+      await pool.query("DELETE FROM galatic_customer_tokens WHERE customer_id=? AND purpose=? AND consumed_at IS NULL", [customerId, purpose]);
+      await pool.query(
+        "INSERT INTO galatic_customer_tokens (token_hash,customer_id,purpose,expires_at) VALUES (?,?,?,?)",
+        [tokenHash, customerId, purpose, expiresAt],
+      );
+    },
+    async consumeCustomerToken(tokenHash, purpose) {
+      await ensureSchema();
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [[token]] = await connection.query(
+          `SELECT customer_id FROM galatic_customer_tokens
+           WHERE token_hash=? AND purpose=? AND consumed_at IS NULL AND expires_at>UTC_TIMESTAMP(3) FOR UPDATE`,
+          [tokenHash, purpose],
+        );
+        if (!token) { await connection.rollback(); return null; }
+        await connection.query("UPDATE galatic_customer_tokens SET consumed_at=UTC_TIMESTAMP(3) WHERE token_hash=?", [tokenHash]);
+        if (purpose === "verify_email") await connection.query(
+          "UPDATE galatic_customers SET email_verified_at=COALESCE(email_verified_at,UTC_TIMESTAMP(3)) WHERE id=?", [token.customer_id],
+        );
+        await connection.commit();
+        return token.customer_id;
+      } catch (error) { await connection.rollback(); throw error; }
+      finally { connection.release(); }
+    },
+    async listCustomerOrders(customer) {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT id,created_at,payment_status,fulfillment_status,total_cents,subtotal_cents,shipping_cents,
+                payment_method,installments,payment_fee_cents,shipping_address_json
+         FROM galatic_orders WHERE customer_id=? OR (customer_id IS NULL AND buyer_email=?)
+         ORDER BY created_at DESC LIMIT 100`, [customer.id, customer.email],
+      );
+      return rows.map((row) => ({
+        order_number: row.id, created_at: row.created_at, payment_status: row.payment_status,
+        shipping_status: row.fulfillment_status, total: Number(row.total_cents), subtotal: Number(row.subtotal_cents),
+        shipping_amount: Number(row.shipping_cents), discount_amount: 0, payment_fee_amount: Number(row.payment_fee_cents), currency: "BRL",
+        shipping_service_name: "Entrega Galatic", payment_method: row.payment_method, installments: Number(row.installments),
+      }));
+    },
+    async getCustomerOrder(customer, orderId) {
+      await ensureSchema();
+      const [[order]] = await pool.query(
+        `SELECT id,created_at,payment_status,payment_method,installments,fulfillment_status,paid_at,buyer_name,
+                shipping_address_json,subtotal_cents,shipping_cents,discount_cents,payment_fee_cents,total_cents
+         FROM galatic_orders WHERE id=? AND (customer_id=? OR (customer_id IS NULL AND buyer_email=?))`,
+        [orderId, customer.id, customer.email],
+      );
+      if (!order) return null;
+      const [items] = await pool.query(
+        "SELECT sku,title name,quantity,total_amount_cents total FROM galatic_order_items WHERE order_id=? ORDER BY id", [orderId],
+      );
+      return { order: {
+        order_number: order.id, created_at: order.created_at, paid_at: order.paid_at,
+        payment_status: order.payment_status, payment_method: order.payment_method, installments: Number(order.installments),
+        shipping_status: order.fulfillment_status, shipping_service_name: "Entrega Galatic", customer_name: order.buyer_name,
+        shipping_address: typeof order.shipping_address_json === "string" ? JSON.parse(order.shipping_address_json) : order.shipping_address_json,
+        subtotal: Number(order.subtotal_cents), shipping_amount: Number(order.shipping_cents),
+        discount_amount: Number(order.discount_cents), payment_fee_amount: Number(order.payment_fee_cents), total: Number(order.total_cents), currency: "BRL",
+      }, items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })), tracking: [] };
+    },
+    async lookupOrder(orderId, email) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT id order_number,created_at,payment_status,fulfillment_status shipping_status,total_cents total,
+                shipping_cents shipping_amount,'BRL' currency
+         FROM galatic_orders WHERE id=? AND buyer_email=?`, [orderId, email],
+      );
+      return row ? { ...row, total: Number(row.total), shipping_amount: Number(row.shipping_amount), shipping_service_name: "Entrega Galatic" } : null;
+    },
+    async listCustomerAddresses(customerId) {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT id,label,recipient_name,federal_tax_id,postal_code,street,number,complement,district,city,state,is_default
+         FROM galatic_customer_addresses WHERE customer_id=? ORDER BY is_default DESC,created_at DESC`, [customerId],
+      );
+      return rows.map((row) => ({ ...row, is_default: Boolean(row.is_default) }));
+    },
+    async createCustomerAddress(customerId, address) {
+      await ensureSchema();
+      const id = randomUUID();
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        if (address.isDefault) await connection.query("UPDATE galatic_customer_addresses SET is_default=0 WHERE customer_id=?", [customerId]);
+        await connection.query(
+          `INSERT INTO galatic_customer_addresses
+           (id,customer_id,label,recipient_name,federal_tax_id,postal_code,street,number,complement,district,city,state,is_default)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, customerId, address.label, address.recipientName, address.federalTaxId || null, address.postalCode,
+            address.street, address.number, address.complement || null, address.district, address.city, address.state, address.isDefault ? 1 : 0],
+        );
+        await connection.commit();
+      } catch (error) { await connection.rollback(); throw error; }
+      finally { connection.release(); }
+      return id;
+    },
+    async deleteCustomerAddress(customerId, addressId) {
+      await ensureSchema();
+      const [result] = await pool.query("DELETE FROM galatic_customer_addresses WHERE id=? AND customer_id=?", [addressId, customerId]);
+      return result.affectedRows > 0;
+    },
+    async getCustomerPreferences(customerId) {
+      await ensureSchema();
+      const [[row]] = await pool.query("SELECT newsletter_enabled,newsletter_status FROM galatic_customers WHERE id=?", [customerId]);
+      return { newsletter_enabled: Boolean(row?.newsletter_enabled), newsletter_status: row?.newsletter_status ?? "disabled" };
+    },
+    async setCustomerPreferences(customerId, enabled) {
+      await ensureSchema();
+      await pool.query("UPDATE galatic_customers SET newsletter_enabled=?,newsletter_status=? WHERE id=?", [enabled ? 1 : 0, enabled ? "active" : "disabled", customerId]);
+      return this.getCustomerPreferences(customerId);
+    },
+    async upsertNewsletter(email, enabled = true, customerId = null) {
+      await ensureSchema();
+      await pool.query(
+        `INSERT INTO galatic_newsletter_subscribers (email,status,customer_id) VALUES (?,?,?)
+         ON DUPLICATE KEY UPDATE status=VALUES(status),customer_id=COALESCE(VALUES(customer_id),customer_id)`,
+        [email, enabled ? "active" : "unsubscribed", customerId],
+      );
+    },
+    async createContactMessage({ customerId = null, name, email, subject, message }) {
+      await ensureSchema();
+      const id = randomUUID();
+      await pool.query(
+        "INSERT INTO galatic_contact_messages (id,customer_id,name,email,subject,message) VALUES (?,?,?,?,?,?)",
+        [id, customerId, name, email, subject, message],
+      );
+      return id;
+    },
+    async listCatalogProducts() {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT sku,slug,title name,description,image_url,category_name category,brand,unit_amount_cents unit_amount,currency,
+                active,manage_stock,stock_quantity FROM galatic_products ORDER BY title`,
+      );
+      return rows.map((row) => ({ ...row, unit_amount: Number(row.unit_amount), currency: String(row.currency).toLowerCase(),
+        available: Boolean(row.active) && (!row.manage_stock || Number(row.stock_quantity) > 0) }));
+    },
+    async getCatalogProduct(slug) {
+      const products = await this.listCatalogProducts();
+      return products.find((product) => product.slug === slug || product.sku === String(slug).toUpperCase()) ?? null;
     },
     async close() { await pool.end(); },
   };
