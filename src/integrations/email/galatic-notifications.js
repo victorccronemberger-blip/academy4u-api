@@ -4,6 +4,11 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[character]));
 
+const money = (cents) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(cents || 0) / 100);
+const shippingLabels = { label_created: "Etiqueta de envio criada", posted: "Pedido postado", in_transit: "Pedido em trânsito",
+  out_for_delivery: "Pedido saiu para entrega", delivered: "Pedido entregue",
+  delivery_exception: "Ocorrência na entrega", returned: "Pedido devolvido", shipment_canceled: "Envio cancelado" };
+
 function configuration(source) {
   const host = source.GALATIC_SMTP_HOST?.trim() || source.SMTP_HOST?.trim();
   const user = source.GALATIC_SMTP_USER?.trim() || source.SMTP_USER?.trim();
@@ -55,13 +60,39 @@ export function createGalaticNotifications(source = process.env) {
     },
     sendOrderCreated({ email, name, orderId, totalCents, method }) {
       return send(email, `Pedido Galatic ${orderId.slice(0, 8).toUpperCase()}`, document("Pedido recebido", "Recebemos seu pedido e estamos acompanhando o pagamento.",
-        `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>O pedido <strong>${escapeHtml(orderId)}</strong> foi registrado no valor de <strong>${new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(totalCents / 100)}</strong>.</p><p>Pagamento: ${method === "pix" ? "Pix à vista" : "cartão de crédito"}.</p>`,
+        `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>O pedido <strong>${escapeHtml(orderId)}</strong> foi registrado no valor de <strong>${money(totalCents)}</strong>.</p><p>Pagamento: ${method === "pix" ? "Pix à vista" : "cartão de crédito"}.</p>`,
         { label: "Acompanhar pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
     },
     sendPaymentConfirmed({ email, name, orderId }) {
       return send(email, "Pagamento confirmado · Galatic", document("Pagamento confirmado", "Seu pagamento foi confirmado e o pedido seguirá para preparação.",
         `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>O pagamento do pedido <strong>${escapeHtml(orderId)}</strong> foi confirmado. Agora começaremos a preparação para envio.</p>`,
         { label: "Ver meu pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
+    },
+    sendPaymentCanceled({ email, name, orderId }) {
+      return send(email, "Pedido cancelado · Galatic", document("Pedido cancelado", "A cobrança pendente foi cancelada com segurança.",
+        `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>A cobrança do pedido <strong>${escapeHtml(orderId)}</strong> foi cancelada. Nenhum envio será realizado e o estoque reservado foi liberado.</p>`,
+        { label: "Voltar à loja", url: `${origin}/loja/` }));
+    },
+    sendRefundRequested({ email, name, orderId }) {
+      return send(email, "Estorno solicitado · Galatic", document("Estorno solicitado", "Recebemos a solicitação de devolução do pagamento.",
+        `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>O estorno integral do pedido <strong>${escapeHtml(orderId)}</strong> foi solicitado ao processador de pagamento. Enviaremos outra atualização quando a devolução for confirmada.</p>`,
+        { label: "Acompanhar pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
+    },
+    sendPaymentReversed({ email, name, orderId, reason }) {
+      const chargeback = reason === "chargeback";
+      return send(email, chargeback ? "Contestação registrada · Galatic" : "Estorno confirmado · Galatic",
+        document(chargeback ? "Pagamento contestado" : "Estorno confirmado",
+          chargeback ? "O pagamento entrou em processo de contestação." : "A devolução do pagamento foi confirmada.",
+          `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>${chargeback ? "Registramos uma contestação" : "O estorno foi confirmado"} para o pedido <strong>${escapeHtml(orderId)}</strong>.</p>`,
+          { label: "Ver pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
+    },
+    sendShippingUpdate({ email, name, orderId, status, trackingCode, description }) {
+      const label = shippingLabels[status] || "Atualização da entrega";
+      const tracking = trackingCode ? `<p>Código de rastreio: <strong>${escapeHtml(trackingCode)}</strong>.</p>` : "";
+      const details = description ? `<p>${escapeHtml(description)}</p>` : "";
+      return send(email, `${label} · Galatic`, document(label, `Novidades sobre a entrega do pedido ${orderId}.`,
+        `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>Há uma atualização na entrega do pedido <strong>${escapeHtml(orderId)}</strong>.</p>${tracking}${details}`,
+        { label: "Acompanhar entrega", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
     },
     previewCustom({ subject, message }) {
       const body = `<p>${escapeHtml(message).replace(/\r?\n/g, "<br>")}</p>`;

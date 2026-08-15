@@ -537,9 +537,12 @@ export function createGalaticMySqlStore(databaseUrl) {
     async getOrderNotification(orderId) {
       await ensureSchema();
       const [[row]] = await pool.query(
-        "SELECT id,buyer_email email,buyer_name name,total_cents,payment_method FROM galatic_orders WHERE id=?", [orderId],
+        `SELECT id,buyer_email email,buyer_name name,total_cents,payment_method,payment_status,
+                fulfillment_status,tracking_code FROM galatic_orders WHERE id=?`, [orderId],
       );
-      return row ? { orderId: row.id, email: row.email, name: row.name, totalCents: Number(row.total_cents), method: row.payment_method } : null;
+      return row ? { orderId: row.id, email: row.email, name: row.name, totalCents: Number(row.total_cents),
+        method: row.payment_method, paymentStatus: row.payment_status,
+        fulfillmentStatus: row.fulfillment_status, trackingCode: row.tracking_code } : null;
     },
     async claimNotification(key) {
       await ensureSchema();

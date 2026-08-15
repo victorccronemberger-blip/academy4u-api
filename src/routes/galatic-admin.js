@@ -60,6 +60,17 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   const router = express.Router();
   const authLimiter = createFixedWindowLimiter({ limit: 10, windowMs: 60_000, prefix: "galatic-admin-auth" });
 
+  async function notifyOnce(orderId, key, method, extra = {}) {
+    if (!notifications?.[method] || !store.getOrderNotification) return;
+    const order = await store.getOrderNotification(orderId);
+    const notificationKey = `${key}:${orderId}`;
+    if (!order || !(await store.claimNotification?.(notificationKey))) return;
+    notifications[method]({ ...order, ...extra }).catch(async (error) => {
+      await store.releaseNotification?.(notificationKey).catch(() => {});
+      console.error("Could not send Galatic admin transaction email", { method, type: error?.name, code: error?.code });
+    });
+  }
+
   async function authenticate(request, response, next) {
     const token = bearer(request);
     const admin = token ? await store.adminForSession(tokenHash(token)) : null;
@@ -150,6 +161,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     try {
       if (!order.providerOrderId) {
         const canceled = await store.adminCancelUnpaidOrder(order.id);
+        if (canceled) await notifyOnce(order.id, "payment-canceled", "sendPaymentCanceled");
         return response.json({ canceled: Boolean(canceled), order_id: order.id });
       }
       const provider = await asaasClient.getPayment(order.providerOrderId);
@@ -160,6 +172,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       if (order.providerGroupId) await asaasClient.deleteInstallment(order.providerGroupId);
       else await asaasClient.deletePayment(order.providerOrderId);
       const canceled = await store.adminCancelUnpaidOrder(order.id);
+      if (canceled) await notifyOnce(order.id, "payment-canceled", "sendPaymentCanceled");
       return response.json({ canceled: Boolean(canceled), order_id: order.id });
     } catch (error) {
       return response.status(error?.status === 404 && order.status === "canceled" ? 200 : 502).json({
@@ -179,6 +192,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       await asaasClient.refundPayment(order.providerOrderId);
       await store.recordOperationalAlert?.({ type: "refund_requested", severity: "info", source: "galatic-admin",
         summary: "Estorno integral solicitado ao Asaas.", context: { orderId: order.id, adminId: request.galaticAdmin.id } });
+      await notifyOnce(order.id, "refund-requested", "sendRefundRequested");
       return response.status(202).json({ requested: true, order_id: order.id, message: "Estorno solicitado. A confirmação será conciliada pelo webhook do Asaas." });
     } catch (error) {
       return response.status(502).json({ error: error?.code ?? "refund_failed", message: "O Asaas não aceitou a solicitação de estorno." });
@@ -188,12 +202,17 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     const tracking = clean(request.body?.tracking_code, 100);
     if (!/^[A-Za-z0-9._\-/]{5,100}$/.test(tracking)) return response.status(400).json({ error: "invalid_tracking" });
     const updated = await store.adminUpdateShipping(request.params.id, { status: "posted", trackingCode: tracking, description: "Pedido postado." });
+    if (updated) await notifyOnce(request.params.id, `shipping-posted:${tracking}`, "sendShippingUpdate",
+      { status: "posted", trackingCode: tracking, description: "Pedido postado." });
     return updated ? response.json({ updated: true, tracking_code: tracking }) : response.status(409).json({ error: "order_not_paid" });
   });
   router.post("/orders/:id/shipping/manual-status", async (request, response) => {
     const status = clean(request.body?.shipping_status, 32);
     if (!["in_transit", "out_for_delivery", "delivered", "delivery_exception", "returned"].includes(status)) return response.status(400).json({ error: "invalid_shipping_status" });
-    const updated = await store.adminUpdateShipping(request.params.id, { status, description: clean(request.body?.description, 500) });
+    const description = clean(request.body?.description, 500);
+    const updated = await store.adminUpdateShipping(request.params.id, { status, description });
+    if (updated) await notifyOnce(request.params.id, `shipping-${status}`, "sendShippingUpdate",
+      { status, description });
     return updated ? response.json({ updated: true, status }) : response.status(409).json({ error: "order_not_paid" });
   });
   router.post("/orders/:id/shipping/label", async (request, response) => {

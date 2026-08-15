@@ -52,6 +52,17 @@ function createAccessCallbacks(tenant, store, notifications = null) {
       return result;
     },
     async onAccessRevoked(orderId, reason) {
+      if (tenant.id === "galatic") {
+        const order = notifications && typeof store.getOrderNotification === "function"
+          ? await store.getOrderNotification(orderId) : null;
+        const key = `payment-reversed:${reason}:${orderId}`;
+        const claimed = order && typeof store.claimNotification === "function" ? await store.claimNotification(key) : Boolean(order);
+        if (claimed) notifications?.sendPaymentReversed?.({ ...order, reason }).catch(async (error) => {
+          await store.releaseNotification?.(key).catch(() => {});
+          console.error("Could not send Galatic reversal email", { type: error?.name, code: error?.code });
+        });
+        return { revoked: true, deliveries: 0 };
+      }
       if (typeof store.revokeOrderAccess !== "function") return { revoked: false, deliveries: 0 };
       const result = await store.revokeOrderAccess(orderId, reason);
       console.log("Payment reversed; LMS access reconciled.", {
@@ -285,7 +296,8 @@ export function createApp(overrides = {}, dependencies = {}) {
   for (const context of contexts.values()) {
     const middleware = [tenantOrigin(context.tenant), tenantReadiness(context)];
     if (context.tenant.id === "galatic") {
-      const fulfillment = createGalaticFulfillmentService({ environment: context.environment, store: context.store, enviaClient });
+      const fulfillment = createGalaticFulfillmentService({ environment: context.environment, store: context.store,
+        enviaClient, notifications: galaticNotifications });
       app.use("/v1/galatic/checkout", ...middleware, createGalaticCheckoutRouter(express, {
         environment: context.environment,
         asaasClient,
@@ -366,7 +378,8 @@ export function createApp(overrides = {}, dependencies = {}) {
   });
   const galaticContext = contexts.get("galatic");
   if (galaticContext) app.post("/v1/webhooks/envia", webhookLimiter,
-    createEnviaWebhookHandler({ environment: galaticContext.environment, store: galaticContext.store }));
+    createEnviaWebhookHandler({ environment: galaticContext.environment, store: galaticContext.store,
+      notifications: galaticNotifications }));
 
   app.use((_request, response) => {
     response.status(404).json({
@@ -380,6 +393,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     app,
     environment,
     asaasClient,
+    galaticNotifications,
     contexts,
     tenants,
     store: defaultContext.store,

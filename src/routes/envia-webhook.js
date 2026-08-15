@@ -22,7 +22,7 @@ function authorized(request, environment) {
   return false;
 }
 
-export function createEnviaWebhookHandler({ environment, store }) {
+export function createEnviaWebhookHandler({ environment, store, notifications = null }) {
   return async function enviaWebhook(request, response) {
     if (!authorized(request, environment)) return response.status(401).json({ error: "invalid_webhook_signature" });
     const data = request.body?.data ?? request.body;
@@ -33,6 +33,15 @@ export function createEnviaWebhookHandler({ environment, store }) {
     const result = await store.updateShipmentFromEvent({ eventId, eventType, trackingCode,
       status: normalizeEnviaStatus(data?.status ?? data?.shipment_status),
       description: String(data?.status_description ?? data?.description ?? data?.status ?? "").trim().slice(0, 500) });
+    if (result?.updated && result.orderId && notifications) {
+      const order = await store.getOrderNotification?.(result.orderId);
+      const key = `shipping:${eventId}:${result.orderId}`;
+      if (order && await store.claimNotification?.(key)) {
+        notifications.sendShippingUpdate?.({ ...order, status: normalizeEnviaStatus(data?.status ?? data?.shipment_status),
+          trackingCode, description: String(data?.status_description ?? data?.description ?? "").trim().slice(0, 500) })
+          .catch(async () => { await store.releaseNotification?.(key).catch(() => {}); });
+      }
+    }
     return response.json({ received: true, ...result });
   };
 }

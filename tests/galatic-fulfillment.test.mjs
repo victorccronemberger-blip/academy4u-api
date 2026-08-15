@@ -41,11 +41,17 @@ test("authenticates and deduplicates Envia tracking webhooks", async () => {
   const secret = "envia-webhook-secret"; const timestamp = String(Date.now()); const event = "tracking.simple";
   const body = { type: event, data: { tracking_number: "BR123", status: "delivered", status_description: "Entregue" } };
   const rawBody = JSON.stringify(body); const signature = crypto.createHmac("sha256", secret).update(`${timestamp}.${event}.${rawBody}`).digest("hex");
-  const calls = []; const handler = createEnviaWebhookHandler({ environment: { galaticEnviaWebhookSecret: secret },
-    store: { updateShipmentFromEvent: async (value) => { calls.push(value); return { updated: true }; } } });
+  const calls = []; const notifications = [];
+  const handler = createEnviaWebhookHandler({ environment: { galaticEnviaWebhookSecret: secret },
+    store: { updateShipmentFromEvent: async (value) => { calls.push(value); return { updated: true, orderId: "order-1" }; },
+      getOrderNotification: async () => ({ orderId: "order-1", email: "cliente@example.com", name: "Cliente" }),
+      claimNotification: async () => true, releaseNotification: async () => {} },
+    notifications: { sendShippingUpdate: async (value) => { notifications.push(value); } } });
   const request = { body, rawBody, get: (name) => ({ "x-webhook-timestamp": timestamp, "x-webhook-event": event,
     "x-webhook-signature": `v1=${signature}`, "x-webhook-id": "delivery-1" })[name.toLowerCase()] };
   const response = { code: 200, status(value) { this.code = value; return this; }, json(value) { this.body = value; return this; } };
   await handler(request, response);
   assert.equal(response.code, 200); assert.equal(calls.length, 1); assert.equal(calls[0].status, "delivered");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notifications.length, 1); assert.equal(notifications[0].status, "delivered");
 });

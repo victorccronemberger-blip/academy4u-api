@@ -1,13 +1,24 @@
 import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 
-export function createGalaticPaymentMaintenance({ environment, store, asaasClient, clock = () => Date.now() }) {
+export function createGalaticPaymentMaintenance({ environment, store, asaasClient, notifications = null, clock = () => Date.now() }) {
   let running = false;
   let interval = null;
   let initial = null;
 
+  async function notifyCanceled(orderId) {
+    if (!notifications?.sendPaymentCanceled || !store.getOrderNotification) return;
+    const order = await store.getOrderNotification(orderId);
+    const key = `payment-expired:${orderId}`;
+    if (!order || !(await store.claimNotification?.(key))) return;
+    notifications.sendPaymentCanceled(order).catch(async () => {
+      await store.releaseNotification?.(key).catch(() => {});
+    });
+  }
+
   async function reconcile(order) {
     if (!order.providerOrderId) {
       await store.adminCancelUnpaidOrder(order.id);
+      await notifyCanceled(order.id);
       return "canceled";
     }
     let payment;
@@ -16,6 +27,7 @@ export function createGalaticPaymentMaintenance({ environment, store, asaasClien
     } catch (error) {
       if (error?.status !== 404) throw error;
       await store.adminCancelUnpaidOrder(order.id);
+      await notifyCanceled(order.id);
       return "canceled";
     }
     const status = normalizeAsaasPaymentStatus(payment?.status);
@@ -36,6 +48,7 @@ export function createGalaticPaymentMaintenance({ environment, store, asaasClien
       }
     }
     await store.adminCancelUnpaidOrder(order.id);
+    await notifyCanceled(order.id);
     return "canceled";
   }
 

@@ -27,7 +27,16 @@ function shipmentView(row) {
     currency: row.currency, created_at: row.created_at };
 }
 
-export function createGalaticFulfillmentService({ environment, store, enviaClient }) {
+export function createGalaticFulfillmentService({ environment, store, enviaClient, notifications = null }) {
+  async function notifyShipping(orderId, key, status, trackingCode, description) {
+    if (!notifications?.sendShippingUpdate || !store.getOrderNotification) return;
+    const notification = await store.getOrderNotification(orderId);
+    if (!notification || !(await store.claimNotification?.(key))) return;
+    notifications.sendShippingUpdate({ ...notification, status, trackingCode, description }).catch(async () => {
+      await store.releaseNotification?.(key).catch(() => {});
+    });
+  }
+
   async function createLabel(orderId) {
     const existing = await store.shipmentForOrder(orderId);
     if (existing) return { created: false, shipment: shipmentView(existing) };
@@ -53,6 +62,9 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
       labelUrl: text(data?.label, 1500) || null, trackUrl: text(data?.trackUrl, 1500) || null,
       costCents: Number.isFinite(Number(data?.totalPrice)) ? Math.round(Number(data.totalPrice) * 100) : null,
       currency: text(data?.currency, 3).toUpperCase() || "BRL" });
+    const notificationKey = `shipping:label_created:${order.id}`;
+    await notifyShipping(order.id, notificationKey, "label_created", trackingCode,
+      "A etiqueta foi criada e o pedido seguirá para postagem.");
     return { created: true, shipment: shipmentView(stored) };
   }
 
@@ -62,9 +74,13 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
     const result = await enviaClient.track([shipment.tracking_code]);
     const data = Array.isArray(result?.data) ? result.data[0] : result?.data;
     const status = normalizeEnviaStatus(data?.status);
-    await store.updateShipmentFromEvent({ eventId: `poll:${shipment.tracking_code}:${text(data?.status, 80)}:${text(data?.events?.[0]?.timestamp, 80)}`,
+    const eventId = `poll:${shipment.tracking_code}:${text(data?.status, 80)}:${text(data?.events?.[0]?.timestamp, 80)}`;
+    const description = text(data?.events?.[0]?.description ?? data?.status, 500);
+    const updated = await store.updateShipmentFromEvent({ eventId,
       eventType: "tracking.poll", trackingCode: shipment.tracking_code, status,
-      description: text(data?.events?.[0]?.description ?? data?.status, 500) });
+      description });
+    if (updated?.updated) await notifyShipping(orderId, `shipping:${eventId}:${orderId}`, status,
+      shipment.tracking_code, description);
     return store.shipmentForOrder(orderId);
   }
 
@@ -73,7 +89,10 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
     if (!shipment) throw Object.assign(new Error("shipment_not_found"), { code: "shipment_not_found" });
     if (shipment.canceled_at) return { canceled: true, shipment: shipmentView(shipment) };
     const result = await enviaClient.cancel({ carrier: shipment.carrier, trackingNumber: shipment.tracking_code });
-    await store.cancelShipment(orderId, result?.data?.balanceReturned ? "Etiqueta cancelada; saldo devolvido pela Envia." : "Cancelamento da etiqueta solicitado à Envia.");
+    const description = result?.data?.balanceReturned ? "Etiqueta cancelada; saldo devolvido pela Envia." : "Cancelamento da etiqueta solicitado à Envia.";
+    await store.cancelShipment(orderId, description);
+    await notifyShipping(orderId, `shipping:shipment_canceled:${orderId}`, "shipment_canceled",
+      shipment.tracking_code, description);
     return { canceled: true, balance_returned: Boolean(result?.data?.balanceReturned), shipment: shipmentView(await store.shipmentForOrder(orderId)) };
   }
 
