@@ -639,14 +639,14 @@ export function createGalaticMySqlStore(databaseUrl) {
           }
           let fulfillmentStatus = null;
           if (resolvedStatus === "paid" && order.stock_released_at) {
-            fulfillmentStatus = await reclaimReleasedStock(connection, order.id) ? "paid" : "manual_stock_review";
+            fulfillmentStatus = await reclaimReleasedStock(connection, order.id) ? "preparing" : "manual_stock_review";
           }
           await connection.query(
             `UPDATE galatic_orders SET payment_status=?,paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at,UTC_TIMESTAMP(3)) ELSE paid_at END,
-             stock_released_at=CASE WHEN ?='paid' AND ?='paid' THEN NULL WHEN ? IN ('failed','canceled') THEN COALESCE(stock_released_at,UTC_TIMESTAMP(3)) ELSE stock_released_at END,
+             stock_released_at=CASE WHEN ?='paid' AND ?='preparing' THEN NULL WHEN ? IN ('failed','canceled') THEN COALESCE(stock_released_at,UTC_TIMESTAMP(3)) ELSE stock_released_at END,
              fulfillment_status=CASE
                WHEN ? IS NOT NULL THEN ?
-               WHEN ?='paid' AND fulfillment_status='awaiting_payment' THEN 'paid'
+               WHEN ?='paid' AND fulfillment_status='awaiting_payment' THEN 'preparing'
                WHEN ? IN ('failed','canceled') AND fulfillment_status='awaiting_payment' THEN IF(?='canceled','canceled','payment_failed')
                WHEN ? IN ('refunded','chargeback') THEN 'payment_reversed'
                ELSE fulfillment_status END
@@ -705,12 +705,12 @@ export function createGalaticMySqlStore(databaseUrl) {
         }
         let fulfillmentStatus = null;
         if (status === "paid" && order.stock_released_at) {
-          fulfillmentStatus = await reclaimReleasedStock(connection, order.id) ? "paid" : "manual_stock_review";
+          fulfillmentStatus = await reclaimReleasedStock(connection, order.id) ? "preparing" : "manual_stock_review";
         }
         await connection.query(
           `UPDATE galatic_orders SET payment_status=?,paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at,UTC_TIMESTAMP(3)) ELSE paid_at END,
-           stock_released_at=CASE WHEN ?='paid' AND ?='paid' THEN NULL WHEN ? IN ('failed','canceled') THEN COALESCE(stock_released_at,UTC_TIMESTAMP(3)) ELSE stock_released_at END,
-           fulfillment_status=CASE WHEN ? IS NOT NULL THEN ? WHEN ?='paid' AND fulfillment_status='awaiting_payment' THEN 'paid'
+           stock_released_at=CASE WHEN ?='paid' AND ?='preparing' THEN NULL WHEN ? IN ('failed','canceled') THEN COALESCE(stock_released_at,UTC_TIMESTAMP(3)) ELSE stock_released_at END,
+           fulfillment_status=CASE WHEN ? IS NOT NULL THEN ? WHEN ?='paid' AND fulfillment_status='awaiting_payment' THEN 'preparing'
            WHEN ? IN ('failed','canceled') AND fulfillment_status='awaiting_payment' THEN IF(?='canceled','canceled','payment_failed')
            WHEN ? IN ('refunded','chargeback') THEN 'payment_reversed' ELSE fulfillment_status END WHERE id=?`,
           [status, status, status, fulfillmentStatus, status, fulfillmentStatus, fulfillmentStatus,
