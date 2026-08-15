@@ -32,7 +32,8 @@ assert.equal(
 assert.deepEqual(checkout.body.methods, ["pix", "credit_card"], "métodos de pagamento divergentes");
 assert.equal(checkout.body.cardMode, "embedded_api", "cartão não está embutido");
 assert.equal(checkout.body.cardInstallmentMaximum, 10, "limite de parcelas divergente");
-assert.equal(checkout.body.cardInterest, "asaas_fees_passed_to_customer", "taxas não estão sendo repassadas");
+assert.equal(checkout.body.cardInterest, "asaas_fees_passed_to_customer_from_2x", "política de juros divergente");
+assert.equal(checkout.body.cardInterestFreeInstallments, 1, "pagamento em 1x não está sem juros");
 assert.equal(checkout.body.pixInstallment, false, "Pix parcelado foi habilitado indevidamente");
 
 const shipping = await request("/v1/galatic/shipping/status");
@@ -61,6 +62,8 @@ assert.equal(preview.response.status, 200, `simulação de parcelas falhou: ${JS
 assert.ok(Number(preview.body.pix?.totalCents) > 0, "total Pix inválido");
 assert.equal(preview.body.card?.length, 10, "o cartão não retornou exatamente 10 planos");
 assert.deepEqual(preview.body.card.map((plan) => plan.installments), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+assert.equal(preview.body.card[0].totalCents, preview.body.pix.totalCents, "cartão em 1x recebeu acréscimo");
+assert.equal(preview.body.card[0].feeCents, 0, "cartão em 1x recebeu taxa do cliente");
 assert.ok(preview.body.card.every((plan) => Number(plan.totalCents) >= Number(preview.body.pix.totalCents)), "taxa do cartão inconsistente");
 
 const buyer = {

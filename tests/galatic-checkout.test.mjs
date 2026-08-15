@@ -43,10 +43,12 @@ test("previews all Galatic card installments with the live Asaas fee table", asy
   assert.equal(body.card.length, 10);
   assert.equal(body.card[0].installments, 1);
   assert.equal(body.card[9].installments, 10);
-  assert.equal(body.card[0].source, "asaas_sales_simulator");
-  assert.equal(simulated.length, 10);
-  assert.deepEqual(simulated[9], { value: 474.99, installmentCount: 10, billingTypes: ["CREDIT_CARD"] });
-  assert.equal(body.card[0].totalCents, Math.ceil((47499 + 49) / (1 - 0.0299)));
+  assert.equal(body.card[0].source, "galatic_interest_free_1x");
+  assert.equal(body.card[0].percentage, 0);
+  assert.equal(body.card[0].feeCents, 0);
+  assert.equal(body.card[0].totalCents, 47499);
+  assert.equal(simulated.length, 9);
+  assert.deepEqual(simulated[8], { value: 474.99, installmentCount: 10, billingTypes: ["CREDIT_CARD"] });
   assert.equal(body.card[9].totalCents, Math.ceil((47499 + 49) / (1 - 0.0449)));
 });
 
@@ -109,6 +111,33 @@ test("creates an embedded Galatic card order in up to 10x and passes through the
   assert.equal(calls[0].billingType, "CREDIT_CARD"); assert.equal(calls[0].installmentCount, 10);
   assert.equal(calls[0].totalValue, expectedTotal / 100); assert.equal(calls[0].creditCard.number, "4444444444444444");
   assert.equal(JSON.stringify(body).includes("4444444444444444"), false);
+});
+
+test("creates a Galatic card order in 1x without charging the Asaas fee to the customer", async (context) => {
+  const galaticStore = store(); const calls = [];
+  const asaasClient = {
+    findCustomersByDocument: async () => ({ data: [{ id: "cus_galatic_card_1x" }] }),
+    simulatePayment: async () => assert.fail("1x interest-free must not request a customer fee"),
+    createPayment: async (payload) => { calls.push(payload); return { id: "pay_galatic_card_1x", status: "CONFIRMED" }; },
+  };
+  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+    PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
+  { stores: { galatic: galaticStore }, asaasClient });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/galatic/checkout/orders`, { method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify({ items: [{ sku: "DEP001", quantity: 1 }], buyer: { firstName: "Victor", lastName: "Cronemberger",
+      email: "victor@example.com", phone: "15997671749", documentNumber: "19100000000",
+      address: { postal_code: "06020190", street: "Avenida Franz Voegeli", number: "501", district: "Parque Continental", city: "Osasco", state: "SP" } },
+      shipping: { quoteId: "93b448ca-3dcc-43cd-9d14-02e14745695f" }, payment: { method: "credit_card", installments: 1,
+        card: { holderName: "Victor Cronemberger", number: "4444444444444444", expiryMonth: "12", expiryYear: "2030", ccv: "123" } } }),
+  });
+  assert.equal(response.status, 201); const body = await response.json();
+  assert.equal(body.totalCents, 47499); assert.equal(body.baseTotalCents, 47499); assert.equal(body.cardFeeCents, 0);
+  assert.equal(calls[0].value, 474.99); assert.equal("installmentCount" in calls[0], false);
+  assert.equal(galaticStore.state.attached[3].paymentFeeCents, 0);
+  assert.equal(galaticStore.state.attached[3].totalCents, 47499);
 });
 
 test("rejects every forbidden Galatic payment method and card plans above 10x before touching Asaas", async (context) => {

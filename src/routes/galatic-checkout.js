@@ -132,6 +132,10 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
     return value;
   }
   async function providerCardPricing(baseCents, installments) {
+    if (installments === 1) {
+      return { baseCents, totalCents: baseCents, feeCents: 0, percentage: 0,
+        installmentCents: baseCents, source: "galatic_interest_free_1x" };
+    }
     const cacheKey = `${baseCents}:${installments}`;
     const cached = simulationCache.get(cacheKey);
     if (cached?.expiresAt > Date.now()) return cached.value;
@@ -157,7 +161,7 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
   }
   router.get("/status", (_request, response) => response.json({ enabled: environment.checkoutEnabled, provider: "asaas", environment: environment.asaasEnvironment,
     methods: environment.checkoutEnabled ? ["pix", "credit_card"] : [], cardMode: "embedded_api", cardInstallmentMaximum: 10,
-    cardInterest: "asaas_fees_passed_to_customer", pixInstallment: false }));
+    cardInterest: "asaas_fees_passed_to_customer_from_2x", cardInterestFreeInstallments: 1, pixInstallment: false }));
 
   router.post("/installments", readLimiter, async (request, response) => {
     if (!environment.checkoutEnabled || !asaasClient || !store.previewCheckout) {
