@@ -1,0 +1,66 @@
+[
+  {
+    "courseId": 2,
+    "artTag": "cpa2026",
+    "artIdCurso": 1338,
+    "artTurma": 4000,
+    "note": "CPA 2026 — turma free (aprova direto no checkout)"
+  },
+  {
+    "courseId": 3,
+    "artTag": "ancord-2026",
+    "artIdCurso": 1331,
+    "artTurma": 3388,
+    "note": "ANCORD 2026 — turma free (3388, inicio 04/2026); paga = 3392 (R$ 99,97)"
+  },
+  {
+    "courseId": 4,
+    "artTag": "cfg_2026",
+    "artIdCurso": 1354,
+    "artTurma": 3989,
+    "note": "CFG 2026 — turma free"
+  },
+  {
+    "courseId": 5,
+    "artTag": "cfp-2026_54",
+    "artIdCurso": 1738,
+    "artTurma": 4155,
+    "note": "CFP 60 Dias Exame 54 — turma 4155; gera 6 bônus (flip de todas as orders)"
+  },
+  {
+    "courseId": 6,
+    "artTag": "CGA_2026",
+    "artIdCurso": 1356,
+    "artTurma": 3990,
+    "note": "CGA 2026 — turma free"
+  },
+  {
+    "courseId": 7,
+    "artTag": "cge-2026",
+    "artIdCurso": 1355,
+    "artTurma": 3991,
+    "note": "CGE 2026 — turma free"
+  },
+  {
+    "courseId": 8,
+    "artTag": "cproi2026",
+    "artIdCurso": 1339,
+    "artTurma": 4001,
+    "note": "CPRO-I 2026 — turma free (aprova direto)"
+  },
+  {
+    "courseId": 9,
+    "artTag": "cpror2026",
+    "artIdCurso": 1341,
+    "artTurma": 3907,
+    "note": "CPRO-R 2026 — turma free"
+  },
+  {
+    "courseId": 10,
+    "artTag": "cfa_2025",
+    "artIdCurso": 1231,
+    "artTurma": 3235,
+    "active": false,
+    "note": "CFA Level I — curso sold_out no LMS; mapping desativado até reabrir (tag cfa_2025, turma 3235 validada)"
+  }
+]

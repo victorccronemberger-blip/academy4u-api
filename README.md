@@ -76,10 +76,43 @@ No Pix parcelado, a primeira parcela confirmada libera acesso. Estorno ou
 chargeback gera lançamento financeiro negativo e remove somente a matrícula
 que o pedido criou.
 
+## Matrícula na ART (principal) com fallback LMS
+
+A partir de um pedido pago (webhook Asaas confirmado), o fluxo `onAccessGranted`
+tenta **primeiro** ativar a matrícula na plataforma ART (academiarafaeltoro.com.br)
+na conta do próprio aluno:
+
+1. `academy_art_mappings` traduz o `course_id` do LMS → tag/turma/id_curso da ART.
+2. `createArtClient` (src/integrations/art/client.js) ativa na conta ART do aluno:
+   - **Conta já existe com senha = CPF** → login direto (reuso, sem provision).
+   - **Conta nova** → provision + checkout + flip (fluxo validado).
+   - **Curso já ativo na conta** → detecta e não cria ordem duplicada.
+   - **Conta existe mas senha desconhecida** (criada externamente ou senha
+     trocada pela plataforma) → `existing_account_no_access`: registra auditoria
+     + alerta dedicado e cai para o LMS (o aluno não fica sem acesso).
+3. `createArtActivationService` (src/services/art-activation.js) orquestra:
+   - Sucesso → registra em `academy_art_activations` (status `activated`) e a
+     matrícula **não** é duplicada no LMS (o aluno acessa o curso na ART).
+   - Item sem mapping, falha ou timeout → registra `failed`/`error` + alerta
+     operacional e **cai para o LMS** (comportamento atual), garantindo acesso.
+4. `grantOrderAccess` pula itens já entregues na ART (sem enrollment LMS
+   duplicada) mas mantém o histórico financeiro (`payment_histories`).
+
+### Configuração
+
+- `ART_ENABLED=true` — liga a ativação ART como principal.
+- Mapeamentos: tabela `academy_art_mappings` (popule com
+  `node scripts/seed-art-mappings.mjs mapping.json` ou pelas rotas admin).
+- Rotas admin (header `x-academy-trusted-token`):
+  - `GET/POST /v1/art/mappings` · `DELETE /v1/art/mappings/:courseId`
+  - `GET /v1/art/activations` (auditoria)
+- Em produção, a ART é chamada com `ip_usuario` fictício (TEST-NET) — nunca o IP
+  do servidor. A conta ART do aluno usa email + CPF dele; se a plataforma trocar
+  a senha (e-mail de matrícula), o fallback LMS cobre sem quebrar o pedido.
+
 ## Configuração
 
 Variáveis ficam somente no painel da Hostinger:
-
 - `MYSQL_URL`
 - `ASAAS_ENABLED=true`
 - `ASAAS_ENVIRONMENT=sandbox` ou `production`

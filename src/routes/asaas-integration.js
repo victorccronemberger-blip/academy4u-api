@@ -83,7 +83,31 @@ export function createAsaasWebhookHandler({
         accessGrantedNow = persisted?.status === "paid" && persisted?.previousStatus !== "paid";
       }
       if (accessGrantedNow && persisted?.id && onAccessGranted) {
-        await onAccessGranted(persisted.id);
+        // A entrega (ativação ART + fallback LMS) pode levar MINUTOS (provision,
+        // scan de orders, verificação de propagação). O Asaas espera resposta
+        // rápida e o servidor tem requestTimeout de 75s: confirmamos o
+        // recebimento imediatamente e processamos em background. O dedupe por
+        // eventId/status + o lock por orderId em onAccessGranted impedem
+        // reprocessamento e execução concorrente do mesmo pedido.
+        Promise.resolve()
+          .then(() => onAccessGranted(persisted.id))
+          .catch(async (error) => {
+            console.error("Access grant pipeline failed after webhook ack", {
+              orderId: persisted.id,
+              type: error?.name,
+            });
+            try {
+              await store.recordOperationalAlert?.({
+                type: "access_grant_failed",
+                source: "asaas-webhook",
+                severity: "critical",
+                summary: "Falha no pipeline de entrega (ART/LMS) após webhook confirmado.",
+                context: { orderId: persisted.id, errorType: error?.name ?? "Error" },
+              });
+            } catch (alertError) {
+              console.error("Could not persist operational alert", { type: alertError?.name });
+            }
+          });
       }
       if (
         persisted?.id

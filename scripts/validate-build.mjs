@@ -11,9 +11,12 @@ await Promise.all([
   import("../src/domain/provider-values.js"),
   import("../src/domain/quote.js"),
   import("../src/integrations/asaas/client.js"),
+  import("../src/integrations/art/client.js"),
   import("../src/services/installment-service.js"),
+  import("../src/services/art-activation.js"),
   import("../src/routes/asaas-integration.js"),
   import("../src/routes/checkout.js"),
+  import("../src/routes/art-admin.js"),
   import("../src/routes/health.js"),
   import("../src/routes/public.js"),
 ]);

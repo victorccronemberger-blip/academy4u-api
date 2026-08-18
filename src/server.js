@@ -52,6 +52,7 @@ function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   paymentMaintenance?.stop();
+  contexts.get(tenants[0].id)?.artRetryWorker?.stop();
   console.log(`ACADEMY4U API received ${signal}.`);
   // Libera imediatamente as conexões keep-alive ociosas; sem isso o
   // server.close() pode aguardar minutos por sockets que nunca fecham.

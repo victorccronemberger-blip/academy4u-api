@@ -8,6 +8,7 @@ import { requestContext } from "./http/request-context.js";
 import { jsonErrorHandler } from "./http/error-handler.js";
 import { createFixedWindowLimiter } from "./http/fixed-window-limiter.js";
 import { createAsaasClient } from "./integrations/asaas/client.js";
+import { createArtClient } from "./integrations/art/client.js";
 import { createGalaticNotifications } from "./integrations/email/galatic-notifications.js";
 import { createEnviaClient } from "./integrations/envia/client.js";
 import { createAsaasWebhookHandler } from "./routes/asaas-integration.js";
@@ -20,13 +21,21 @@ import { createGalaticCustomerRouter } from "./routes/galatic-customer.js";
 import { createGalaticPublicRouter } from "./routes/galatic-public.js";
 import { createGalaticAdminRouter } from "./routes/galatic-admin.js";
 import { createEnviaWebhookHandler } from "./routes/envia-webhook.js";
+import { createArtAdminRouter } from "./routes/art-admin.js";
 import { createGalaticFulfillmentService } from "./services/galatic-fulfillment.js";
 import { createInstallmentService } from "./services/installment-service.js";
+import { createArtActivationService } from "./services/art-activation.js";
+import { createArtRetryWorker } from "./services/art-retry-worker.js";
 import { createInMemoryStore } from "./store/in-memory-store.js";
 import { createGalaticMySqlStore } from "./store/galatic-mysql-store.js";
 import { createMySqlStore } from "./store/mysql-store.js";
 
-function createAccessCallbacks(tenant, store, notifications = null) {
+function createAccessCallbacks(tenant, store, notifications = null, artActivation = null) {
+  // Lock em memória por pedido: dois gatilhos concorrentes (ex.: Asaas
+  // reenviando PAYMENT_CONFIRMED + PAYMENT_RECEIVED) NÃO podem rodar a
+  // ativação ART em paralelo — logins/checkouts dobrados na mesma conta
+  // quebram a conta do aluno na plataforma.
+  const accessGrantInFlight = new Set();
   return {
     async onAccessGranted(orderId) {
       if (tenant.id === "galatic") {
@@ -41,15 +50,58 @@ function createAccessCallbacks(tenant, store, notifications = null) {
         });
         return { granted: true, deliveries: 0 };
       }
-      const result = typeof store.grantOrderAccess === "function"
-        ? await store.grantOrderAccess(orderId)
-        : { granted: true, deliveries: 0 };
-      console.log("Payment confirmed; LMS access reconciled.", {
-        tenant: tenant.id,
-        orderId,
-        deliveries: result.deliveries,
-      });
-      return result;
+      // Matrícula principal no ART: tenta ativar cada curso do pedido na conta
+      // ART do aluno. Itens sem mapping ou com falha caem no LMS abaixo.
+      if (accessGrantInFlight.has(orderId)) {
+        console.log("Access grant already in flight; skipping duplicate trigger.", { tenant: tenant.id, orderId });
+        return { granted: false, deliveries: 0, artMode: "already_in_flight" };
+      }
+      accessGrantInFlight.add(orderId);
+      let artMode = "art";
+      let allArt = false;
+      try {
+        if (artActivation?.isEnabled?.()) {
+          try {
+            const outcome = await artActivation.activateOrder(orderId);
+            artMode = outcome.mode;
+            allArt = outcome.mode === "art";
+            console.log("ART activation attempted.", {
+              tenant: tenant.id,
+              orderId,
+              mode: outcome.mode,
+              results: outcome.results?.map((result) => ({ itemId: result.itemId, courseId: result.courseId, mode: result.mode, reason: result.reason ?? null })),
+            });
+          } catch (error) {
+            // A ativação ART nunca pode derrubar a entrega: em erro, segue LMS.
+            artMode = "lms_fallback";
+            allArt = false;
+            console.error("ART activation orchestration failed; falling back to LMS.", {
+              tenant: tenant.id,
+              orderId,
+              type: error?.name,
+            });
+          }
+        } else {
+          artMode = "lms_fallback";
+          allArt = false;
+        }
+        // Quando TODOS os itens foram ativados na ART, a matrícula LMS não é
+        // necessária (evita duplicação e o grantOrderAccess pularia tudo). Se
+        // qualquer item caiu no LMS, roda o fluxo local normal.
+        let result = { granted: false, deliveries: 0 };
+        if (!allArt && typeof store.grantOrderAccess === "function") {
+          result = await store.grantOrderAccess(orderId);
+        }
+        console.log("Payment confirmed; access reconciled.", {
+          tenant: tenant.id,
+          orderId,
+          artMode,
+          deliveries: result.deliveries,
+        });
+        return { ...result, artMode };
+      } finally {
+        accessGrantInFlight.delete(orderId);
+      }
     },
     async onAccessRevoked(orderId, reason) {
       if (tenant.id === "galatic") {
@@ -136,7 +188,16 @@ export function createApp(overrides = {}, dependencies = {}) {
     const readiness = { status: "connecting", error: null };
     let catalog = null;
     const productResolver = (slug) => catalog?.getCheckoutProduct(slug) ?? getCheckoutProduct(slug);
-    const callbacks = createAccessCallbacks(tenant, store, galaticNotifications);
+    const artClient = tenant.isDefault
+      ? dependencies.artClient ?? createArtClient(tenantEnvironment)
+      : null;
+    const artActivation = artClient
+      ? dependencies.artActivation ?? createArtActivationService({ environment: tenantEnvironment, store, artClient })
+      : null;
+    const artRetryWorker = artClient
+      ? dependencies.artRetryWorker ?? createArtRetryWorker({ store, artClient, maxRetries: Number(tenantEnvironment.artRetryMaxTries) || 8 })
+      : null;
+    const callbacks = createAccessCallbacks(tenant, store, galaticNotifications, artActivation);
     const context = {
       tenant,
       environment: tenantEnvironment,
@@ -144,6 +205,8 @@ export function createApp(overrides = {}, dependencies = {}) {
       installmentService,
       readiness,
       productResolver,
+      ...(artActivation ? { artActivation } : {}),
+      ...(artRetryWorker ? { artRetryWorker } : {}),
       ...callbacks,
     };
     context.dataReady = Promise.resolve()
@@ -214,6 +277,12 @@ export function createApp(overrides = {}, dependencies = {}) {
     .then(() => Promise.all([...contexts.values()].map((context) => context.dataReady)))
     .then((result) => {
       for (const context of contexts.values()) context.readiness.status = "ready";
+      // Worker de retry ART em background: converte ativações pendentes quando
+      // a senha do aluno no ART reverte para o CPF (padrão da plataforma).
+      const worker = defaultContext.artRetryWorker;
+      if (worker && environment.artEnabled) {
+        worker.start(Number(environment.artRetryIntervalMs) || 5 * 60_000);
+      }
       return result;
     })
     .catch((error) => {
@@ -344,6 +413,11 @@ export function createApp(overrides = {}, dependencies = {}) {
       store: context.store,
       productResolver: context.productResolver,
     }));
+    app.use(`${base}/art`, ...middleware, createArtAdminRouter(express, {
+      environment: context.environment,
+      store: context.store,
+      artRetryWorker: context.artRetryWorker ?? null,
+    }));
     app.use(`/health/${context.tenant.id}`, createHealthRouter(
       express,
       context.environment,
@@ -365,6 +439,11 @@ export function createApp(overrides = {}, dependencies = {}) {
   app.use("/v1/public", ...defaultMiddleware, createPublicCommerceRouter(express, {
     store: defaultContext.store,
     productResolver: defaultContext.productResolver,
+  }));
+  app.use("/v1/art", ...defaultMiddleware, createArtAdminRouter(express, {
+    environment: defaultContext.environment,
+    store: defaultContext.store,
+    artRetryWorker: defaultContext.artRetryWorker ?? null,
   }));
 
   // O webhook é a única rota exposta à internet sem CORS/origem. Sem limite,

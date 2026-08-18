@@ -42,6 +42,8 @@ export function createInMemoryStore() {
   const attempts = new Map();
   const webhookEvents = new Set();
   const operationalAlerts = [];
+  const artMappings = new Map();
+  const artActivations = [];
 
   function couponView(code) {
     const value = coupons.get(code);
@@ -377,6 +379,133 @@ export function createInMemoryStore() {
         installmentCents: order.installmentCents,
         totalCents: order.totalCents,
       };
+    },
+    // ------------------------------------------------------------------
+    // Integração ART (modo local/desenvolvimento)
+    // ------------------------------------------------------------------
+    async listArtMappings({ activeOnly = true } = {}) {
+      return [...artMappings.values()]
+        .filter((mapping) => !activeOnly || mapping.active)
+        .map((mapping) => ({ ...mapping }));
+    },
+    async getArtMapping(courseId) {
+      const mapping = artMappings.get(Number(courseId));
+      return mapping && mapping.active ? { ...mapping } : null;
+    },
+    async saveArtMapping(mapping) {
+      const courseId = Number(mapping.courseId);
+      const next = {
+        courseId,
+        artTag: String(mapping.artTag ?? ""),
+        artIdCurso: Number(mapping.artIdCurso),
+        artTurma: Number(mapping.artTurma),
+        active: mapping.active !== false,
+      };
+      artMappings.set(courseId, next);
+      return { ...next };
+    },
+    async deleteArtMapping(courseId) {
+      const existing = artMappings.get(Number(courseId));
+      if (existing) { existing.active = false; artMappings.set(Number(courseId), existing); }
+      return true;
+    },
+    async recordArtActivation(entry) {
+      const existing = artActivations.find((activation) => activation.orderId === entry.orderId && activation.orderItemId === entry.orderItemId);
+      if (existing) {
+        // retryCount/nextRetryAt indefinidos = preservar o valor gravado:
+        // regravação pelo serviço não pode zerar contador/backoff do worker.
+        const merged = { ...entry };
+        if (merged.retryCount == null) merged.retryCount = existing.retryCount ?? 0;
+        if (merged.nextRetryAt == null) merged.nextRetryAt = existing.nextRetryAt ?? null;
+        Object.assign(existing, merged, { updatedAt: new Date().toISOString() });
+        return { id: existing.id, status: entry.status, updated: true };
+      }
+      const record = {
+        id: artActivations.length + 1,
+        createdAt: new Date().toISOString(),
+        ...entry,
+        retryCount: entry.retryCount ?? 0,
+        nextRetryAt: entry.nextRetryAt ?? null,
+      };
+      artActivations.push(record);
+      return { id: record.id, status: entry.status, updated: false };
+    },
+    async listArtActivationsPendingRetry({ limit = 50, maxRetries = 8 } = {}) {
+      const now = Date.now();
+      return artActivations
+        .filter((activation) => ["existing_account_no_access", "failed", "error"].includes(activation.status)
+          && Number(activation.retryCount ?? 0) < maxRetries
+          && (!activation.nextRetryAt || new Date(activation.nextRetryAt).getTime() <= now))
+        .sort((a, b) => a.id - b.id)
+        .slice(0, limit)
+        .map((activation) => ({
+          id: activation.id,
+          orderId: activation.orderId,
+          orderItemId: activation.orderItemId ?? null,
+          courseId: activation.courseId,
+          lmsUserId: activation.lmsUserId,
+          artEmail: activation.artEmail,
+          artTag: activation.artTag,
+          status: activation.status,
+          retryCount: Number(activation.retryCount ?? 0),
+          nextRetryAt: activation.nextRetryAt ?? null,
+          flippedOrders: activation.flippedOrders ?? [],
+        }));
+    },
+    async getArtActivation(orderId, orderItemId) {
+      const existing = artActivations.find((activation) => activation.orderId === orderId && activation.orderItemId === orderItemId);
+      return existing ? { id: existing.id, status: existing.status, artProfileId: existing.artProfileId ?? null } : null;
+    },
+    async updateArtActivationRetry(activationId, { status, retryCount, nextRetryAt, result = null, errorMessage = null, flippedOrders = null }) {
+      const activation = artActivations.find((entry) => entry.id === activationId);
+      if (!activation) return false;
+      activation.status = status;
+      activation.retryCount = retryCount;
+      activation.nextRetryAt = nextRetryAt ?? null;
+      if (result !== null) activation.result = result;
+      if (errorMessage !== null) activation.errorMessage = errorMessage;
+      if (flippedOrders !== null) activation.flippedOrders = flippedOrders;
+      return true;
+    },
+    async listArtActivations({ limit = 50, status = null } = {}) {
+      const rows = artActivations
+        .filter((activation) => !status || activation.status === status)
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .slice(0, limit);
+      return rows.map((activation) => ({
+        id: activation.id,
+        orderId: activation.orderId,
+        orderItemId: activation.orderItemId ?? null,
+        courseId: activation.courseId,
+        lmsUserId: activation.lmsUserId,
+        artEmail: activation.artEmail,
+        artProfileId: activation.artProfileId ?? null,
+        artTag: activation.artTag,
+        status: activation.status,
+        result: activation.result ?? null,
+        errorMessage: activation.errorMessage ?? null,
+        flippedOrders: activation.flippedOrders ?? [],
+        createdAt: activation.createdAt,
+      }));
+    },
+    async getOrderRecipient(orderId) {
+      const order = orders.get(orderId);
+      if (!order) return null;
+      return {
+        orderId: order.id,
+        lmsRecipientUserId: order.lmsRecipientUserId ? Number(order.lmsRecipientUserId) : null,
+        email: String(order.buyerEmail ?? "").trim().toLowerCase(),
+        cpf: String(order.buyerCpf ?? "").replace(/\D/g, ""),
+        name: String(order.buyerName ?? "").trim(),
+      };
+    },
+    async getOrderItemsForArt(orderId) {
+      return (orderItems.get(orderId) ?? []).map((item) => ({
+        id: item.id,
+        courseId: item.courseId ?? null,
+        courseSlug: item.courseSlug,
+        title: item.title,
+      }));
     },
   };
 }

@@ -90,6 +90,8 @@ export function createMySqlStore(databaseUrl) {
         `CREATE TABLE IF NOT EXISTS academy_operational_alerts (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, alert_type VARCHAR(48) NOT NULL, severity VARCHAR(16) NOT NULL DEFAULT 'error', source VARCHAR(48) NOT NULL, summary VARCHAR(255) NOT NULL, context_json JSON NULL, occurred_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), notified_at DATETIME(3) NULL, INDEX academy_alerts_pending (notified_at, occurred_at), INDEX academy_alerts_type_time (alert_type, occurred_at))`,
         `CREATE TABLE IF NOT EXISTS academy_order_deliveries (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id CHAR(36) NOT NULL, order_item_id BIGINT UNSIGNED NOT NULL, user_id BIGINT UNSIGNED NOT NULL, course_id BIGINT UNSIGNED NOT NULL, enrollment_id BIGINT UNSIGNED NULL, enrollment_created TINYINT(1) NOT NULL DEFAULT 0, payment_history_id INT UNSIGNED NULL, refund_payment_history_id INT UNSIGNED NULL, delivered_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), revoked_at DATETIME(3) NULL, UNIQUE INDEX academy_deliveries_order_item (order_id,order_item_id), INDEX academy_deliveries_user_course (user_id,course_id), CONSTRAINT academy_deliveries_order_fk FOREIGN KEY (order_id) REFERENCES academy_orders(id) ON DELETE CASCADE)`,
         `CREATE TABLE IF NOT EXISTS academy_order_receipts (id CHAR(36) PRIMARY KEY, order_id CHAR(36) NOT NULL, order_item_id BIGINT UNSIGNED NOT NULL, provider_payment_id VARCHAR(80) NOT NULL, installment_number TINYINT UNSIGNED NOT NULL, amount_cents INT UNSIGNED NOT NULL, payment_history_id INT UNSIGNED NULL, refund_payment_history_id INT UNSIGNED NULL, refund_reason VARCHAR(24) NULL, refunded_at DATETIME(3) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), UNIQUE INDEX academy_receipts_payment_item (provider_payment_id,order_item_id), INDEX academy_receipts_order (order_id,installment_number), CONSTRAINT academy_receipts_order_fk FOREIGN KEY (order_id) REFERENCES academy_orders(id) ON DELETE CASCADE)`,
+        `CREATE TABLE IF NOT EXISTS academy_art_mappings (course_id BIGINT UNSIGNED PRIMARY KEY, art_tag VARCHAR(80) NOT NULL, art_id_curso INT UNSIGNED NOT NULL, art_turma INT UNSIGNED NOT NULL, active TINYINT(1) NOT NULL DEFAULT 1, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), UNIQUE INDEX academy_art_mappings_tag (art_tag))`,
+        `CREATE TABLE IF NOT EXISTS academy_art_activations (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id CHAR(36) NOT NULL, order_item_id BIGINT UNSIGNED NULL, course_id BIGINT UNSIGNED NOT NULL, lms_user_id BIGINT UNSIGNED NOT NULL, art_email VARCHAR(160) NOT NULL, art_profile_id BIGINT UNSIGNED NULL, art_tag VARCHAR(80) NOT NULL, status VARCHAR(40) NOT NULL, result_json JSON NULL, error_message VARCHAR(500) NULL, flipped_orders_json JSON NULL, retry_count SMALLINT UNSIGNED NOT NULL DEFAULT 0, next_retry_at DATETIME(3) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), UNIQUE INDEX academy_art_activations_order_item (order_id, order_item_id), INDEX academy_art_activations_user_course (lms_user_id, course_id), INDEX academy_art_activations_status (status, created_at), INDEX academy_art_activations_retry (status, next_retry_at), CONSTRAINT academy_art_activations_order_fk FOREIGN KEY (order_id) REFERENCES academy_orders(id) ON DELETE CASCADE)`,
       ];
       for (const sql of statements) await pool.query(sql);
       for (const suffix of tableSuffixes) {
@@ -132,6 +134,8 @@ export function createMySqlStore(databaseUrl) {
         ["academy_order_receipts", "refund_payment_history_id", "INT UNSIGNED NULL"],
         ["academy_order_receipts", "refund_reason", "VARCHAR(24) NULL"],
         ["academy_order_receipts", "refunded_at", "DATETIME(3) NULL"],
+        ["academy_art_activations", "retry_count", "SMALLINT UNSIGNED NOT NULL DEFAULT 0"],
+        ["academy_art_activations", "next_retry_at", "DATETIME(3) NULL"],
       ];
       for (const [table, column, definition] of additions) {
         const [[existing]] = await pool.query(
@@ -139,6 +143,16 @@ export function createMySqlStore(databaseUrl) {
           [table, column],
         );
         if (!existing) await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      }
+      // status em VARCHAR(24) trunca 'existing_account_no_access' (26 chars)
+      // silenciosamente no MySQL — o filtro IN(...) do retry nunca casava.
+      // Amplia a coluna de forma idempotente (só altera se ainda for < 40).
+      const [[statusColumn]] = await pool.query(
+        `SELECT CHARACTER_MAXIMUM_LENGTH AS len FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='academy_art_activations' AND COLUMN_NAME='status'`,
+      );
+      if (statusColumn && Number(statusColumn.len) < 40) {
+        await pool.query("ALTER TABLE academy_art_activations MODIFY COLUMN status VARCHAR(40) NOT NULL");
       }
       await pool.query(
         "INSERT IGNORE INTO academy_schema_migrations (version,name) VALUES (?,?)",
@@ -765,6 +779,14 @@ export function createMySqlStore(databaseUrl) {
             [orderId, item.id],
           );
           if (existingDelivery) continue;
+          // Item já entregue no ART (matrícula principal): registra o histórico
+          // financeiro e a trilha de entrega, mas NÃO cria enrollment LMS
+          // duplicada. O aluno acessa o curso na plataforma ART.
+          const [[artActivation]] = await connection.query(
+            `SELECT id,art_profile_id,art_tag FROM academy_art_activations
+             WHERE order_id=? AND order_item_id=? AND status='activated' LIMIT 1`,
+            [orderId, item.id],
+          );
           const [[course]] = await connection.query(
             `SELECT c.id,c.user_id,c.expiry_period,u.role creator_role FROM courses c
              LEFT JOIN users u ON u.id=c.user_id WHERE c.id=? LIMIT 1`,
@@ -783,6 +805,19 @@ export function createMySqlStore(databaseUrl) {
               [order.lms_buyer_user_id ?? order.lms_recipient_user_id, course.id, "asaas", amountValue, `ACADEMY4U-${order.id}-${item.id}`.slice(0, 255), nowUnix, nowUnix, adminRevenue, instructorRevenue, 0, 0, order.provider_order_id, order.id, order.coupon_code],
             );
             paymentHistoryId = historyResult.insertId;
+          }
+          if (artActivation) {
+            await connection.query(
+              `INSERT INTO academy_order_deliveries
+               (order_id,order_item_id,user_id,course_id,enrollment_id,enrollment_created,payment_history_id)
+               VALUES (?,?,?,?,NULL,0,?)`,
+              [order.id, item.id, order.lms_recipient_user_id, course.id, paymentHistoryId],
+            );
+            if (order.lms_buyer_user_id) {
+              await connection.query("DELETE FROM cart_items WHERE user_id=? AND course_id=?", [order.lms_buyer_user_id, course.id]);
+            }
+            deliveries += 1;
+            continue;
           }
           const [[existingEnrollment]] = await connection.query(
             `SELECT id FROM enrollments WHERE user_id=? AND course_id=?
@@ -914,6 +949,221 @@ export function createMySqlStore(databaseUrl) {
         installmentCents: row.installmentCents === null ? null : Number(row.installmentCents),
         totalCents: Number(row.totalCents),
       } : null;
+    },
+    // ------------------------------------------------------------------
+    // Integração ART (matrícula principal com fallback LMS)
+    // ------------------------------------------------------------------
+    async listArtMappings({ activeOnly = true } = {}) {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT course_id AS courseId,art_tag AS artTag,art_id_curso AS artIdCurso,art_turma AS artTurma,active
+         FROM academy_art_mappings ${activeOnly ? "WHERE active=1" : ""} ORDER BY course_id`,
+      );
+      return rows.map((row) => ({
+        courseId: Number(row.courseId),
+        artTag: row.artTag,
+        artIdCurso: Number(row.artIdCurso),
+        artTurma: Number(row.artTurma),
+        active: Boolean(row.active),
+      }));
+    },
+    async getArtMapping(courseId) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        `SELECT course_id AS courseId,art_tag AS artTag,art_id_curso AS artIdCurso,art_turma AS artTurma,active
+         FROM academy_art_mappings WHERE course_id=? AND active=1 LIMIT 1`,
+        [courseId],
+      );
+      if (!row) return null;
+      return {
+        courseId: Number(row.courseId),
+        artTag: row.artTag,
+        artIdCurso: Number(row.artIdCurso),
+        artTurma: Number(row.artTurma),
+        active: Boolean(row.active),
+      };
+    },
+    async saveArtMapping(mapping) {
+      await ensureSchema();
+      const courseId = Number(mapping.courseId);
+      const artTag = String(mapping.artTag ?? "").trim();
+      const artIdCurso = Number(mapping.artIdCurso);
+      const artTurma = Number(mapping.artTurma);
+      if (!Number.isSafeInteger(courseId) || courseId < 1) throw new Error("invalid_art_course_id");
+      if (!artTag) throw new Error("invalid_art_tag");
+      if (!Number.isSafeInteger(artIdCurso) || artIdCurso < 1) throw new Error("invalid_art_id_curso");
+      if (!Number.isSafeInteger(artTurma) || artTurma < 1) throw new Error("invalid_art_turma");
+      // art_tag é UNIQUE: sem esta checagem, um upsert cuja tag já pertence a
+      // OUTRO course_id atualizaria a linha errada silenciosamente (e o curso
+      // pretendido ficaria sem mapping).
+      const [[tagConflict]] = await pool.query(
+        "SELECT course_id FROM academy_art_mappings WHERE art_tag=? AND course_id<>? LIMIT 1",
+        [artTag, courseId],
+      );
+      if (tagConflict) throw new Error("art_tag_in_use");
+      await pool.query(
+        `INSERT INTO academy_art_mappings (course_id,art_tag,art_id_curso,art_turma,active)
+         VALUES (?,?,?,?,?)
+         ON DUPLICATE KEY UPDATE art_tag=VALUES(art_tag),art_id_curso=VALUES(art_id_curso),
+           art_turma=VALUES(art_turma),active=VALUES(active)`,
+        [courseId, artTag, artIdCurso, artTurma, mapping.active === false ? 0 : 1],
+      );
+      return this.getArtMapping(courseId);
+    },
+    async deleteArtMapping(courseId) {
+      await ensureSchema();
+      await pool.query("UPDATE academy_art_mappings SET active=0 WHERE course_id=?", [courseId]);
+      return true;
+    },
+    // Registro de auditoria de cada tentativa de ativação ART por item de pedido.
+    // Idempotente por (order_id, order_item_id): reexecutar o webhook não duplica.
+    async recordArtActivation({ orderId, orderItemId, courseId, lmsUserId, artEmail, artProfileId, artTag, status, result = null, errorMessage = null, flippedOrders = null, retryCount = null, nextRetryAt = null }) {
+      await ensureSchema();
+      const [[existing]] = await pool.query(
+        "SELECT id,status FROM academy_art_activations WHERE order_id=? AND order_item_id=?",
+        [orderId, orderItemId ?? null],
+      );
+      if (existing) {
+        // retryCount/nextRetryAt null = preservar o valor gravado: uma
+        // regravação pelo serviço (ex.: webhook re-entregue) não pode zerar
+        // o contador nem o backoff do worker de retry.
+        await pool.query(
+          `UPDATE academy_art_activations SET status=?,art_profile_id=?,result_json=?,error_message=?,flipped_orders_json=?,
+             retry_count=COALESCE(?,retry_count),next_retry_at=COALESCE(?,next_retry_at) WHERE id=?`,
+          [status, artProfileId ?? null, result ? JSON.stringify(result) : null, errorMessage ? String(errorMessage).slice(0, 500) : null, flippedOrders ? JSON.stringify(flippedOrders) : null, retryCount ?? null, nextRetryAt ?? null, existing.id],
+        );
+        return { id: existing.id, status, updated: true };
+      }
+      const [insert] = await pool.query(
+        `INSERT INTO academy_art_activations
+         (order_id,order_item_id,course_id,lms_user_id,art_email,art_profile_id,art_tag,status,result_json,error_message,flipped_orders_json,retry_count,next_retry_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [orderId, orderItemId ?? null, courseId, lmsUserId, artEmail, artProfileId ?? null, artTag, status, result ? JSON.stringify(result) : null, errorMessage ? String(errorMessage).slice(0, 500) : null, flippedOrders ? JSON.stringify(flippedOrders) : null, retryCount ?? 0, nextRetryAt ?? null],
+      );
+      return { id: insert.insertId, status, updated: false };
+    },
+    // Ativações elegíveis para retry em background (conta existente sem acesso
+    // ou falha transitória), com próxima tentativa vencida.
+    async listArtActivationsPendingRetry({ limit = 50, maxRetries = 8 } = {}) {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT a.id,a.order_id AS orderId,a.order_item_id AS orderItemId,a.course_id AS courseId,
+         a.lms_user_id AS lmsUserId,a.art_email AS artEmail,a.art_tag AS artTag,a.status,
+         a.retry_count AS retryCount,a.next_retry_at AS nextRetryAt,a.flipped_orders_json AS flippedOrdersJson
+         FROM academy_art_activations a
+         WHERE a.status IN ('existing_account_no_access','failed','error')
+           AND a.retry_count < ?
+           AND (a.next_retry_at IS NULL OR a.next_retry_at<=NOW(3))
+         ORDER BY a.id ASC LIMIT ?`,
+        [maxRetries, limit],
+      );
+      return rows.map((row) => ({
+        id: Number(row.id),
+        orderId: row.orderId,
+        orderItemId: row.orderItemId ? Number(row.orderItemId) : null,
+        courseId: Number(row.courseId),
+        lmsUserId: Number(row.lmsUserId),
+        artEmail: row.artEmail,
+        artTag: row.artTag,
+        status: row.status,
+        retryCount: Number(row.retryCount),
+        nextRetryAt: iso(row.nextRetryAt),
+        flippedOrders: fromJson(row.flippedOrdersJson, []),
+      }));
+    },
+    // Consulta pontual para idempotência do serviço: item já ativado no ART
+    // não reexecuta o fluxo (cada execução custa logins/scans na conta).
+    async getArtActivation(orderId, orderItemId) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        "SELECT id,status,art_profile_id AS artProfileId FROM academy_art_activations WHERE order_id=? AND order_item_id=? LIMIT 1",
+        [orderId, orderItemId ?? null],
+      );
+      return row ? { id: Number(row.id), status: row.status, artProfileId: row.artProfileId ? Number(row.artProfileId) : null } : null;
+    },
+    async updateArtActivationRetry(activationId, { status, retryCount, nextRetryAt, result = null, errorMessage = null, flippedOrders = null }) {
+      await ensureSchema();
+      await pool.query(
+        `UPDATE academy_art_activations SET status=?,retry_count=?,next_retry_at=?,result_json=?,error_message=?,flipped_orders_json=? WHERE id=?`,
+        [status, retryCount, nextRetryAt ?? null, result ? JSON.stringify(result) : null, errorMessage ? String(errorMessage).slice(0, 500) : null, flippedOrders ? JSON.stringify(flippedOrders) : null, activationId],
+      );
+      return true;
+    },
+    async listArtActivations({ limit = 50, status = null } = {}) {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        `SELECT a.id,a.order_id AS orderId,a.order_item_id AS orderItemId,a.course_id AS courseId,
+         a.lms_user_id AS lmsUserId,a.art_email AS artEmail,a.art_profile_id AS artProfileId,
+         a.art_tag AS artTag,a.status,a.result_json AS resultJson,a.error_message AS errorMessage,
+         a.flipped_orders_json AS flippedOrdersJson,a.retry_count AS retryCount,
+         a.next_retry_at AS nextRetryAt,a.created_at AS createdAt
+         FROM academy_art_activations a ${status ? "WHERE a.status=?" : ""}
+         ORDER BY a.id DESC LIMIT ?`,
+        status ? [status, limit] : [limit],
+      );
+      return rows.map((row) => ({
+        id: Number(row.id),
+        orderId: row.orderId,
+        orderItemId: row.orderItemId ? Number(row.orderItemId) : null,
+        courseId: Number(row.courseId),
+        lmsUserId: Number(row.lmsUserId),
+        artEmail: row.artEmail,
+        artProfileId: row.artProfileId ? Number(row.artProfileId) : null,
+        artTag: row.artTag,
+        status: row.status,
+        result: fromJson(row.resultJson, null),
+        errorMessage: row.errorMessage ?? null,
+        flippedOrders: fromJson(row.flippedOrdersJson, []),
+        retryCount: Number(row.retryCount ?? 0),
+        nextRetryAt: iso(row.nextRetryAt) ?? null,
+        createdAt: iso(row.createdAt),
+      }));
+    },
+    // Dados do aluno/destinatário para provisionar a conta ART por aluno.
+    async getOrderRecipient(orderId) {
+      await ensureSchema();
+      const [[order]] = await pool.query(
+        `SELECT o.id,o.buyer_email AS buyerEmail,o.buyer_cpf AS buyerCpf,o.buyer_name AS buyerName,
+         o.lms_recipient_user_id AS lmsRecipientUserId
+         FROM academy_orders o WHERE o.id=? LIMIT 1`,
+        [orderId],
+      );
+      if (!order) return null;
+      let email = order.buyerEmail;
+      let cpf = order.buyerCpf;
+      let name = order.buyerName;
+      if (order.lmsRecipientUserId) {
+        const [[user]] = await pool.query(
+          "SELECT email,cpf,name FROM users WHERE id=? LIMIT 1",
+          [order.lmsRecipientUserId],
+        );
+        if (user) {
+          email = user.email || email;
+          cpf = String(user.cpf ?? "").replace(/\D/g, "") || cpf;
+          name = user.name || name;
+        }
+      }
+      return {
+        orderId: order.id,
+        lmsRecipientUserId: order.lmsRecipientUserId ? Number(order.lmsRecipientUserId) : null,
+        email: String(email ?? "").trim().toLowerCase(),
+        cpf: String(cpf ?? "").replace(/\D/g, ""),
+        name: String(name ?? "").trim(),
+      };
+    },
+    // Itens de pedido com course_id resolvido (para buscar o mapping ART).
+    async getOrderItemsForArt(orderId) {
+      await ensureSchema();
+      const [rows] = await pool.query(
+        "SELECT id,course_id AS courseId,course_slug AS courseSlug,title FROM academy_order_items WHERE order_id=? ORDER BY id",
+        [orderId],
+      );
+      return rows.map((row) => ({
+        id: Number(row.id),
+        courseId: row.courseId ? Number(row.courseId) : null,
+        courseSlug: row.courseSlug,
+        title: row.title,
+      }));
     },
   };
 }
