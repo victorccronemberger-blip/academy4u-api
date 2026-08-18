@@ -147,6 +147,11 @@ export function getEnvironment(source = process.env) {
     // dinamicamente a partir daqui. Só precisa subir se um dia o topo já
     // estiver muito acima (performance da primeira sonda do processo).
     artScanFloor: parsePositiveInteger(source.ART_SCAN_FLOOR, 3180000, "ART_SCAN_FLOOR"),
+    // Delays do fluxo de ativação (ms) — defaults são os valores validados.
+    artProvisionPollMs: parsePositiveInteger(source.ART_PROVISION_POLL_MS, 4000, "ART_PROVISION_POLL_MS"),
+    artPhase2WaitMs: parsePositiveInteger(source.ART_PHASE2_WAIT_MS, 5000, "ART_PHASE2_WAIT_MS"),
+    artLoginPollMs: parsePositiveInteger(source.ART_LOGIN_POLL_MS, 3000, "ART_LOGIN_POLL_MS"),
+    artVerifyWaitMs: parsePositiveInteger(source.ART_VERIFY_WAIT_MS, 25000, "ART_VERIFY_WAIT_MS"),
   };
 }
 
