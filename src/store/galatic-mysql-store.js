@@ -156,6 +156,7 @@ export function createGalaticMySqlStore(databaseUrl) {
         `CREATE TABLE IF NOT EXISTS galatic_newsletter_subscribers (
           email VARCHAR(160) PRIMARY KEY, status VARCHAR(24) NOT NULL DEFAULT 'active',
           customer_id CHAR(36) NULL, consent_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          action_token_hash CHAR(64) NULL, action_token_expires_at DATETIME(3) NULL,
           updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
         )`,
         `CREATE TABLE IF NOT EXISTS galatic_contact_messages (
@@ -246,6 +247,8 @@ export function createGalaticMySqlStore(databaseUrl) {
         "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS merchant_identifier_status VARCHAR(24) NOT NULL DEFAULT 'unknown' AFTER fiscal_reference_url",
         "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS fiscal_json JSON NULL AFTER merchant_identifier_status",
         "ALTER TABLE galatic_contact_messages ADD COLUMN IF NOT EXISTS admin_notes TEXT NULL AFTER message",
+        "ALTER TABLE galatic_newsletter_subscribers ADD COLUMN IF NOT EXISTS action_token_hash CHAR(64) NULL AFTER consent_at",
+        "ALTER TABLE galatic_newsletter_subscribers ADD COLUMN IF NOT EXISTS action_token_expires_at DATETIME(3) NULL AFTER action_token_hash",
         "ALTER TABLE galatic_customers ADD COLUMN IF NOT EXISTS status VARCHAR(24) NOT NULL DEFAULT 'active' AFTER newsletter_status",
       ]) await pool.query(alteration);
 
@@ -942,6 +945,46 @@ export function createGalaticMySqlStore(databaseUrl) {
          ON DUPLICATE KEY UPDATE status=VALUES(status),customer_id=COALESCE(VALUES(customer_id),customer_id)`,
         [email, enabled ? "active" : "unsubscribed", customerId],
       );
+    },
+    async requestNewsletterSubscription({ email, tokenHash, expiresAt }) {
+      await ensureSchema();
+      await pool.query(
+        `INSERT INTO galatic_newsletter_subscribers (email,status,action_token_hash,action_token_expires_at)
+         VALUES (?,'pending',?,?) ON DUPLICATE KEY UPDATE status='pending',action_token_hash=VALUES(action_token_hash),
+         action_token_expires_at=VALUES(action_token_expires_at),updated_at=UTC_TIMESTAMP(3)`,
+        [email, tokenHash, expiresAt],
+      );
+    },
+    async confirmNewsletterSubscription(tokenHash, unsubscribeTokenHash) {
+      await ensureSchema();
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [[row]] = await connection.query(
+          `SELECT email FROM galatic_newsletter_subscribers WHERE action_token_hash=? AND status='pending'
+           AND action_token_expires_at>UTC_TIMESTAMP(3) FOR UPDATE`, [tokenHash],
+        );
+        if (!row) { await connection.rollback(); return null; }
+        await connection.query(
+          `UPDATE galatic_newsletter_subscribers SET status='active',consent_at=UTC_TIMESTAMP(3),
+           action_token_hash=?,action_token_expires_at=NULL WHERE email=?`, [unsubscribeTokenHash, row.email],
+        );
+        await connection.commit();
+        return row.email;
+      } catch (error) { await connection.rollback(); throw error; }
+      finally { connection.release(); }
+    },
+    async unsubscribeNewsletter(tokenHash) {
+      await ensureSchema();
+      const [[row]] = await pool.query(
+        "SELECT email FROM galatic_newsletter_subscribers WHERE action_token_hash=? AND status='active'", [tokenHash],
+      );
+      if (!row) return null;
+      await pool.query(
+        "UPDATE galatic_newsletter_subscribers SET status='unsubscribed',action_token_hash=NULL,action_token_expires_at=NULL WHERE email=?",
+        [row.email],
+      );
+      return row.email;
     },
     async createContactMessage({ customerId = null, name, email, subject, message }) {
       await ensureSchema();

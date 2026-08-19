@@ -64,13 +64,15 @@ test("renders every new Galatic lifecycle email with the official visual signatu
   const customer = { first_name: "Victor", email: "victor@example.com" };
   await notifications.sendWelcome({ customer });
   await notifications.sendPasswordChanged({ customer });
-  await notifications.sendNewsletterConfirmed({ email: customer.email });
+  await notifications.sendNewsletterVerification({ email: customer.email, token: "a".repeat(64) });
+  await notifications.sendNewsletterConfirmed({ email: customer.email, unsubscribeToken: "b".repeat(64) });
+  await notifications.sendNewsletterUnsubscribed({ email: customer.email });
   await notifications.sendContactReceived({ email: customer.email, name: "Victor", protocol: "GAL-123", subject: "Meu pedido" });
   await notifications.sendContactAlert({ email: customer.email, name: "Victor", protocol: "GAL-123", subject: "Meu pedido" });
 
-  assert.equal(deliveries.length, 5);
+  assert.equal(deliveries.length, 7);
   assert.deepEqual(deliveries.map((item) => item.to[0]), [
-    customer.email, customer.email, customer.email, customer.email, "comercial@galatic.com.br",
+    customer.email, customer.email, customer.email, customer.email, customer.email, customer.email, "comercial@galatic.com.br",
   ]);
   for (const delivery of deliveries) {
     assert.match(delivery.html, /galatic-wordmark-email-v2\.png/);

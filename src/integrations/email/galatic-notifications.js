@@ -112,10 +112,22 @@ export function createGalaticNotifications(source = process.env) {
         `<p>Olá, <strong>${escapeHtml(customer.first_name)}</strong>.</p><p>Sua senha foi alterada. Se você não realizou essa mudança, recupere o acesso imediatamente e entre em contato com a Galatic.</p>`,
         { label: "Entrar na minha conta", url: `${origin}/entrar/` }));
     },
-    sendNewsletterConfirmed({ email }) {
+    sendNewsletterVerification({ email, token }) {
+      const url = `${origin}/newsletter/confirmar/?token=${encodeURIComponent(token)}`;
+      return send(email, "Confirme sua inscrição · Carta da Mesa", document("Confirme sua inscrição", "Só falta confirmar que este endereço pertence a você.",
+        `<p>Você pediu para receber a Carta da Mesa.</p><p>Confirme sua inscrição para receber seleções de jogos, guias e novidades da Galatic.</p>`,
+        { label: "Confirmar inscrição", url }));
+    },
+    sendNewsletterConfirmed({ email, unsubscribeToken }) {
+      const unsubscribeUrl = `${origin}/newsletter/descadastrar/?token=${encodeURIComponent(unsubscribeToken)}`;
       return send(email, "Inscrição confirmada · Carta da Mesa", document("Bem-vindo à Carta da Mesa", "Sua inscrição nas novidades da Galatic foi confirmada.",
-        `<p>Sua inscrição está ativa.</p><p>Você receberá seleções de jogos, guias e novidades da Galatic. Nada de excesso: somente conteúdo útil para escolher melhor a próxima partida.</p>`,
+        `<p>Sua inscrição está ativa.</p><p>Você receberá seleções de jogos, guias e novidades da Galatic. Nada de excesso: somente conteúdo útil para escolher melhor a próxima partida.</p><p style="font-size:12px;color:#817789">Você pode <a href="${escapeHtml(unsubscribeUrl)}" style="color:#ff8055">cancelar a inscrição a qualquer momento</a>.</p>`,
         { label: "Explorar a Galatic", url: `${origin}/loja/` }));
+    },
+    sendNewsletterUnsubscribed({ email }) {
+      return send(email, "Inscrição cancelada · Carta da Mesa", document("Inscrição cancelada", "Sua preferência foi atualizada.",
+        `<p>Seu endereço foi removido da Carta da Mesa e não receberá novos e-mails de novidades.</p><p>Você poderá se inscrever novamente quando quiser.</p>`,
+        { label: "Voltar à Galatic", url: `${origin}/` }));
     },
     sendContactReceived({ email, name, protocol, subject }) {
       return send(email, `Recebemos sua mensagem · ${escapeHtml(protocol)}`, document("Mensagem recebida", "A equipe Galatic recebeu sua solicitação.",

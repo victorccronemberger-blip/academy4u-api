@@ -3,7 +3,7 @@ import test from "node:test";
 import { createApp } from "../src/application.js";
 
 function customerStore() {
-  const state = { customer: null, sessions: new Map(), tokens: new Map() };
+  const state = { customer: null, sessions: new Map(), tokens: new Map(), newsletter: null };
   return {
     state, ensureSchema: async () => {}, close: async () => {},
     createCustomer: async (input) => {
@@ -26,11 +26,20 @@ function customerStore() {
     getCustomerPreferences: async () => ({ newsletter_enabled: false, newsletter_status: "disabled" }),
     setCustomerPreferences: async (_id, enabled) => ({ newsletter_enabled: enabled, newsletter_status: enabled ? "active" : "disabled" }),
     upsertNewsletter: async () => {},
+    requestNewsletterSubscription: async (value) => { state.newsletter = { ...value, status: "pending" }; },
+    confirmNewsletterSubscription: async (hash, unsubscribeHash) => {
+      if (state.newsletter?.tokenHash !== hash || state.newsletter.status !== "pending") return null;
+      state.newsletter = { ...state.newsletter, tokenHash: unsubscribeHash, status: "active" }; return state.newsletter.email;
+    },
+    unsubscribeNewsletter: async (hash) => {
+      if (state.newsletter?.tokenHash !== hash || state.newsletter.status !== "active") return null;
+      state.newsletter.status = "unsubscribed"; return state.newsletter.email;
+    },
   };
 }
 
-async function start(context, store) {
-  const { app } = createApp({ PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: store } });
+async function start(context, store, dependencies = {}) {
+  const { app } = createApp({ PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: store }, ...dependencies });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
   await new Promise((resolve) => server.once("listening", resolve)); return server.address().port;
 }
@@ -58,4 +67,28 @@ test("allows PATCH and DELETE in the Galatic CORS contract without accepting ano
   assert.equal(allowed.status, 204); assert.match(allowed.headers.get("access-control-allow-methods"), /PATCH/);
   const blocked = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/me`, { headers: { origin: "https://evil.example" } });
   assert.equal(blocked.status, 403);
+});
+
+test("completes newsletter double opt-in and one-click cancellation", async (context) => {
+  const store = customerStore(); const messages = [];
+  const notifications = {
+    ready: true,
+    sendNewsletterVerification: async (value) => messages.push({ type: "verify", ...value }),
+    sendNewsletterConfirmed: async (value) => messages.push({ type: "confirmed", ...value }),
+    sendNewsletterUnsubscribed: async (value) => messages.push({ type: "unsubscribed", ...value }),
+  };
+  const port = await start(context, store, { galaticNotifications: notifications });
+  const headers = { "content-type": "application/json", origin: "https://galatic.com.br" };
+  const subscription = await fetch(`http://127.0.0.1:${port}/v1/galatic/newsletter/subscribe`, { method: "POST", headers,
+    body: JSON.stringify({ email: "Victor@Example.com", consent: true }) });
+  assert.equal(subscription.status, 200); assert.equal(messages[0].type, "verify");
+  assert.match(messages[0].token, /^[a-f0-9]{64}$/);
+  const confirmation = await fetch(`http://127.0.0.1:${port}/v1/galatic/newsletter/confirm`, { method: "POST", headers,
+    body: JSON.stringify({ token: messages[0].token }) });
+  assert.equal(confirmation.status, 200); assert.equal(messages[1].type, "confirmed");
+  assert.match(messages[1].unsubscribeToken, /^[a-f0-9]{64}$/);
+  const cancellation = await fetch(`http://127.0.0.1:${port}/v1/galatic/newsletter/unsubscribe`, { method: "POST", headers,
+    body: JSON.stringify({ token: messages[1].unsubscribeToken }) });
+  assert.equal(cancellation.status, 200); assert.equal(messages[2].type, "unsubscribed");
+  assert.equal(store.state.newsletter.status, "unsubscribed");
 });

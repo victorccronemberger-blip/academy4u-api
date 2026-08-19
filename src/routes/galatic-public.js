@@ -1,7 +1,9 @@
-import { normalizeEmail } from "../domain/password.js";
+import { normalizeEmail, opaqueToken, tokenHash } from "../domain/password.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 
 const clean = (value, maximum) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maximum);
+const newsletterToken = () => tokenHash(opaqueToken());
+const expiresIn = (milliseconds) => new Date(Date.now() + milliseconds).toISOString().slice(0, 23).replace("T", " ");
 
 export function createGalaticPublicRouter(express, { store, notifications = null }) {
   const router = express.Router();
@@ -19,15 +21,36 @@ export function createGalaticPublicRouter(express, { store, notifications = null
   });
   router.post("/newsletter/subscribe", writeLimiter, async (request, response) => {
     if (request.body?.website) return response.json({ message: "Inscrição recebida." });
+    if (!notifications?.ready) return response.status(503).json({ error: "email_unavailable", message: "A confirmação por e-mail está temporariamente indisponível." });
     try {
       const email = normalizeEmail(request.body?.email);
       if (request.body?.consent !== true) throw new Error("Confirme que deseja receber as novidades.");
-      await store.upsertNewsletter(email, true);
-      notifications?.sendNewsletterConfirmed?.({ email }).catch((error) => {
-        console.error("Could not send Galatic newsletter email", { type: error?.name, code: error?.code });
-      });
-      return response.json({ message: "Inscrição confirmada. Você já está na Carta da Mesa." });
+      const token = newsletterToken();
+      await store.requestNewsletterSubscription({ email, tokenHash: tokenHash(token), expiresAt: expiresIn(24 * 3600000) });
+      await notifications.sendNewsletterVerification({ email, token });
+      return response.json({ message: "Confira seu e-mail para confirmar a inscrição na Carta da Mesa." });
     } catch (error) { return response.status(400).json({ error: "invalid_newsletter", message: error.message }); }
+  });
+  router.post("/newsletter/confirm", writeLimiter, async (request, response) => {
+    const token = clean(request.body?.token, 64);
+    if (!/^[a-f0-9]{64}$/i.test(token)) return response.status(400).json({ error: "invalid_newsletter_token", message: "Este link é inválido ou expirou." });
+    const unsubscribeToken = newsletterToken();
+    const email = await store.confirmNewsletterSubscription(tokenHash(token), tokenHash(unsubscribeToken));
+    if (!email) return response.status(400).json({ error: "invalid_newsletter_token", message: "Este link é inválido ou expirou." });
+    notifications?.sendNewsletterConfirmed?.({ email, unsubscribeToken }).catch((error) => {
+      console.error("Could not send Galatic newsletter welcome", { type: error?.name, code: error?.code });
+    });
+    return response.json({ message: "Inscrição confirmada. Você já está na Carta da Mesa." });
+  });
+  router.post("/newsletter/unsubscribe", writeLimiter, async (request, response) => {
+    const token = clean(request.body?.token, 64);
+    if (!/^[a-f0-9]{64}$/i.test(token)) return response.status(400).json({ error: "invalid_newsletter_token", message: "Este link é inválido ou já foi utilizado." });
+    const email = await store.unsubscribeNewsletter(tokenHash(token));
+    if (!email) return response.status(400).json({ error: "invalid_newsletter_token", message: "Este link é inválido ou já foi utilizado." });
+    notifications?.sendNewsletterUnsubscribed?.({ email }).catch((error) => {
+      console.error("Could not send Galatic newsletter cancellation", { type: error?.name, code: error?.code });
+    });
+    return response.json({ message: "Inscrição cancelada. Você não receberá novos e-mails da Carta da Mesa." });
   });
   router.post("/contact", writeLimiter, async (request, response) => {
     if (request.body?.website) return response.json({ message: "Mensagem recebida." });
