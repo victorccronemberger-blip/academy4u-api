@@ -69,13 +69,22 @@ test("renders every new Galatic lifecycle email with the official visual signatu
   await notifications.sendNewsletterUnsubscribed({ email: customer.email });
   await notifications.sendContactReceived({ email: customer.email, name: "Victor", protocol: "GAL-123", subject: "Meu pedido" });
   await notifications.sendContactAlert({ email: customer.email, name: "Victor", protocol: "GAL-123", subject: "Meu pedido" });
+  await notifications.sendOrderCreated({ email: customer.email, name: "Victor", orderId: "order-12345678", totalCents: 18990, method: "pix" });
+  await notifications.sendShippingUpdate({ email: customer.email, name: "Victor", orderId: "order-12345678", status: "in_transit", trackingCode: "BR123GAL" });
 
-  assert.equal(deliveries.length, 7);
+  assert.equal(deliveries.length, 9);
   assert.deepEqual(deliveries.map((item) => item.to[0]), [
     customer.email, customer.email, customer.email, customer.email, customer.email, customer.email, "comercial@galatic.com.br",
+    customer.email, customer.email,
   ]);
   for (const delivery of deliveries) {
     assert.match(delivery.html, /galatic-wordmark-email-v2\.png/);
+    assert.match(delivery.html, /CNPJ 67\.956\.916\/0001-90/);
+    assert.match(delivery.html, /comercial@galatic\.com\.br/);
     assert.doesNotMatch(delivery.html, /<div[^>]*>GALATIC<\/div>/);
   }
+  assert.match(deliveries[0].html, /galatic-email-account-v1\.jpg/);
+  assert.match(deliveries[2].html, /galatic-email-community-v1\.jpg/);
+  assert.match(deliveries[7].html, /galatic-email-order-v1\.jpg/);
+  assert.match(deliveries[8].html, /galatic-email-shipping-v1\.jpg/);
 });

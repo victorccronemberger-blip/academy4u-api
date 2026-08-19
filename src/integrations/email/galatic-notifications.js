@@ -9,6 +9,29 @@ const shippingLabels = { label_created: "Etiqueta de envio criada", posted: "Ped
   out_for_delivery: "Pedido saiu para entrega", delivered: "Pedido entregue",
   delivery_exception: "Ocorrência na entrega", returned: "Pedido devolvido", shipment_canceled: "Envio cancelado" };
 
+const emailVisuals = Object.freeze({
+  account: {
+    eyebrow: "Conta e segurança",
+    image: "https://galatic.com.br/assets/media/email/galatic-email-account-v1.jpg",
+    alt: "Portal cósmico com símbolos de proteção da conta Galatic",
+  },
+  order: {
+    eyebrow: "Pedido e pagamento",
+    image: "https://galatic.com.br/assets/media/email/galatic-email-order-v1.jpg",
+    alt: "Pedido Galatic em uma mesa de jogo cósmica",
+  },
+  shipping: {
+    eyebrow: "Jornada do pedido",
+    image: "https://galatic.com.br/assets/media/email/galatic-email-shipping-v1.jpg",
+    alt: "Entrega Galatic percorrendo uma rota entre as estrelas",
+  },
+  community: {
+    eyebrow: "Comunidade Galatic",
+    image: "https://galatic.com.br/assets/media/email/galatic-email-community-v1.jpg",
+    alt: "Jogadores reunidos em uma mesa cósmica Galatic",
+  },
+});
+
 function smtpConfiguration(source) {
   const host = source.GALATIC_SMTP_HOST?.trim() || source.SMTP_HOST?.trim();
   const user = source.GALATIC_SMTP_USER?.trim() || source.SMTP_USER?.trim();
@@ -48,17 +71,21 @@ async function hostingerRequest(config, path, options = {}) {
   return response.json();
 }
 
-function document(title, preview, body, action = null) {
+function document(title, preview, body, action = null, family = "community") {
   const safeTitle = escapeHtml(title); const safePreview = escapeHtml(preview);
-  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${safeTitle}</title></head>
-  <body style="margin:0;background:#0f0c16;color:#f7f1e8;font-family:Arial,sans-serif"><div style="display:none;max-height:0;overflow:hidden">${safePreview}</div>
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#0f0c16;padding:32px 12px"><tr><td align="center">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:620px;background:#171220;border:1px solid #352842;border-radius:20px;overflow:hidden">
-  <tr><td style="padding:24px 34px;background:linear-gradient(135deg,#25162f,#11101b);border-bottom:3px solid #ff6b3d"><a href="https://galatic.com.br/" style="display:inline-block;text-decoration:none"><img src="https://galatic.com.br/assets/media/brand/galatic-wordmark-email-v2.png" width="288" height="99" alt="Galatic Boardgame Store" style="display:block;width:288px;max-width:100%;height:auto;border:0"></a></td></tr>
-  <tr><td style="padding:38px 34px"><div style="color:#ff8055;font-size:11px;font-weight:800;letter-spacing:2px;text-transform:uppercase">Sua mesa. Sua história.</div><h1 style="font-size:30px;line-height:1.15;margin:15px 0;color:#fff">${safeTitle}</h1><div style="color:#d3cad8;font-size:15px;line-height:1.75">${body}</div>
-  ${action ? `<a href="${escapeHtml(action.url)}" style="display:inline-block;margin-top:26px;background:#ff6b3d;color:#160b08;text-decoration:none;font-weight:900;padding:15px 22px;border-radius:11px">${escapeHtml(action.label)}</a>` : ""}
-  <p style="margin:30px 0 0;color:#817789;font-size:12px;line-height:1.6">Se você não solicitou esta mensagem, ignore-a com segurança.</p></td></tr>
-  <tr><td style="padding:22px 34px;border-top:1px solid #352842;color:#817789;font-size:11px;line-height:1.6">Galatic · Board games para transformar encontros em histórias.<br>Esta é uma mensagem transacional automática.</td></tr>
+  const visual = emailVisuals[family] || emailVisuals.community;
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="color-scheme" content="light"><title>${safeTitle}</title>
+  <style>@media only screen and (max-width:640px){.email-shell{width:100%!important;border-radius:0!important}.email-pad{padding:28px 22px!important}.brand-pad{padding:19px 22px!important}.email-title{font-size:27px!important}.footer-copy{padding-left:14px!important}.email-canvas{padding:0!important}}</style></head>
+  <body style="margin:0;padding:0;background:#eee8df;color:#f7f1e8;font-family:Arial,Helvetica,sans-serif;-webkit-text-size-adjust:100%"><div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">${safePreview}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#eee8df"><tr><td class="email-canvas" align="center" style="padding:34px 12px">
+  <table class="email-shell" role="presentation" width="620" cellspacing="0" cellpadding="0" border="0" style="width:620px;max-width:620px;background:#171220;border:1px solid #33283d;border-radius:22px;overflow:hidden;box-shadow:0 14px 40px rgba(18,12,28,.16)">
+  <tr><td class="brand-pad" align="center" style="padding:21px 34px;background:#100d18;border-bottom:3px solid #f56b36"><a href="https://galatic.com.br/" style="display:inline-block;text-decoration:none"><img src="https://galatic.com.br/assets/media/brand/galatic-wordmark-email-v2.png" width="238" alt="Galatic Boardgame Store" style="display:block;width:238px;max-width:100%;height:auto;border:0"></a></td></tr>
+  <tr><td style="padding:0;background:#090d18"><img src="${visual.image}" width="620" alt="${escapeHtml(visual.alt)}" style="display:block;width:100%;max-width:620px;height:auto;border:0"></td></tr>
+  <tr><td class="email-pad" style="padding:40px 42px 42px;background:#171220"><div style="color:#ff8055;font-size:11px;font-weight:800;letter-spacing:2.2px;text-transform:uppercase">${escapeHtml(visual.eyebrow)}</div><h1 class="email-title" style="font-size:32px;line-height:1.16;margin:14px 0 18px;color:#fff;font-weight:800;letter-spacing:-.5px">${safeTitle}</h1><div style="color:#d8cfdd;font-size:15px;line-height:1.75">${body}</div>
+  ${action ? `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:27px"><tr><td bgcolor="#ff6b3d" style="border-radius:12px"><a href="${escapeHtml(action.url)}" style="display:inline-block;background:#ff6b3d;color:#160b08;text-decoration:none;font-size:14px;line-height:18px;font-weight:900;padding:15px 23px;border-radius:12px">${escapeHtml(action.label)} &nbsp;→</a></td></tr></table>` : ""}
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:32px;border-top:1px solid #352a3f"><tr><td style="padding-top:19px;color:#8f8596;font-size:12px;line-height:1.65">Precisa de ajuda? Responda este e-mail ou acesse nossa <a href="https://galatic.com.br/ajuda/" style="color:#ff8055;text-decoration:underline">Central de ajuda</a>.</td></tr></table></td></tr>
+  <tr><td style="padding:25px 32px;background:#f7f0e7;color:#15111d"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td width="58" valign="top"><a href="https://galatic.com.br/" style="text-decoration:none"><img src="https://galatic.com.br/favicon-galatic-20260818-192.png" width="52" height="52" alt="Galatic" style="display:block;width:52px;height:52px;border:0;border-radius:12px"></a></td><td class="footer-copy" valign="top" style="padding-left:17px;color:#5e5664;font-size:11px;line-height:1.65"><strong style="display:block;color:#171220;font-size:13px;margin-bottom:2px">Galatic Boardgame Store</strong>Sua mesa. Sua história.<br>CNPJ 67.956.916/0001-90 · <a href="mailto:comercial@galatic.com.br" style="color:#c54f27">comercial@galatic.com.br</a><br><a href="https://galatic.com.br/politicas/privacidade/" style="color:#5e5664">Privacidade</a> &nbsp;·&nbsp; <a href="https://galatic.com.br/politicas/termos/" style="color:#5e5664">Termos de uso</a></td></tr></table></td></tr>
+  <tr><td align="center" style="padding:12px 20px;background:#ff6b3d;color:#25100a;font-size:9px;font-weight:800;letter-spacing:1.7px;text-transform:uppercase">Encontros que viram histórias</td></tr>
   </table></td></tr></table></body></html>`;
 }
 
@@ -94,71 +121,71 @@ export function createGalaticNotifications(source = process.env) {
       const url = `${origin}/confirmar-email/?token=${encodeURIComponent(token)}`;
       return send(customer.email, "Confirme sua conta Galatic", document("Confirme sua conta", `Olá, ${customer.first_name}. Falta só confirmar seu e-mail.`,
         `<p>Olá, <strong>${escapeHtml(customer.first_name)}</strong>.</p><p>Sua conta Galatic foi criada. Confirme o endereço de e-mail para proteger seu acesso e acompanhar seus pedidos.</p>`,
-        { label: "Confirmar meu e-mail", url }));
+        { label: "Confirmar meu e-mail", url }, "account"));
     },
     sendWelcome({ customer }) {
       return send(customer.email, "Conta confirmada · Galatic", document("Sua conta está pronta", "Seu e-mail foi confirmado e sua conta Galatic já está protegida.",
         `<p>Olá, <strong>${escapeHtml(customer.first_name)}</strong>.</p><p>Seu e-mail foi confirmado. Agora você pode salvar favoritos, acompanhar pedidos e manter seus dados de entrega organizados em um só lugar.</p>`,
-        { label: "Acessar minha conta", url: `${origin}/minha-conta/` }));
+        { label: "Acessar minha conta", url: `${origin}/minha-conta/` }, "account"));
     },
     sendPasswordReset({ customer, token }) {
       const url = `${origin}/recuperar-acesso/?token=${encodeURIComponent(token)}`;
       return send(customer.email, "Redefinição de senha Galatic", document("Redefina sua senha", "Recebemos uma solicitação de recuperação de acesso.",
         `<p>Olá, <strong>${escapeHtml(customer.first_name)}</strong>.</p><p>Use o botão abaixo para criar uma nova senha. O link expira em 1 hora.</p>`,
-        { label: "Criar nova senha", url }));
+        { label: "Criar nova senha", url }, "account"));
     },
     sendPasswordChanged({ customer }) {
       return send(customer.email, "Senha alterada · Galatic", document("Sua senha foi alterada", "A senha da sua conta Galatic foi atualizada com sucesso.",
         `<p>Olá, <strong>${escapeHtml(customer.first_name)}</strong>.</p><p>Sua senha foi alterada. Se você não realizou essa mudança, recupere o acesso imediatamente e entre em contato com a Galatic.</p>`,
-        { label: "Entrar na minha conta", url: `${origin}/entrar/` }));
+        { label: "Entrar na minha conta", url: `${origin}/entrar/` }, "account"));
     },
     sendNewsletterVerification({ email, token }) {
       const url = `${origin}/newsletter/confirmar/?token=${encodeURIComponent(token)}`;
       return send(email, "Confirme sua inscrição · Carta da Mesa", document("Confirme sua inscrição", "Só falta confirmar que este endereço pertence a você.",
         `<p>Você pediu para receber a Carta da Mesa.</p><p>Confirme sua inscrição para receber seleções de jogos, guias e novidades da Galatic.</p>`,
-        { label: "Confirmar inscrição", url }));
+        { label: "Confirmar inscrição", url }, "community"));
     },
     sendNewsletterConfirmed({ email, unsubscribeToken }) {
       const unsubscribeUrl = `${origin}/newsletter/descadastrar/?token=${encodeURIComponent(unsubscribeToken)}`;
       return send(email, "Inscrição confirmada · Carta da Mesa", document("Bem-vindo à Carta da Mesa", "Sua inscrição nas novidades da Galatic foi confirmada.",
         `<p>Sua inscrição está ativa.</p><p>Você receberá seleções de jogos, guias e novidades da Galatic. Nada de excesso: somente conteúdo útil para escolher melhor a próxima partida.</p><p style="font-size:12px;color:#817789">Você pode <a href="${escapeHtml(unsubscribeUrl)}" style="color:#ff8055">cancelar a inscrição a qualquer momento</a>.</p>`,
-        { label: "Explorar a Galatic", url: `${origin}/loja/` }));
+        { label: "Explorar a Galatic", url: `${origin}/loja/` }, "community"));
     },
     sendNewsletterUnsubscribed({ email }) {
       return send(email, "Inscrição cancelada · Carta da Mesa", document("Inscrição cancelada", "Sua preferência foi atualizada.",
         `<p>Seu endereço foi removido da Carta da Mesa e não receberá novos e-mails de novidades.</p><p>Você poderá se inscrever novamente quando quiser.</p>`,
-        { label: "Voltar à Galatic", url: `${origin}/` }));
+        { label: "Voltar à Galatic", url: `${origin}/` }, "community"));
     },
     sendContactReceived({ email, name, protocol, subject }) {
       return send(email, `Recebemos sua mensagem · ${escapeHtml(protocol)}`, document("Mensagem recebida", "A equipe Galatic recebeu sua solicitação.",
         `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>Registramos sua mensagem sobre <strong>${escapeHtml(subject)}</strong>.</p><p>Protocolo: <strong>${escapeHtml(protocol)}</strong>.</p><p>Responderemos pelo mesmo endereço de e-mail.</p>`,
-        { label: "Central de ajuda", url: `${origin}/ajuda/` }));
+        { label: "Central de ajuda", url: `${origin}/ajuda/` }, "community"));
     },
     sendContactAlert({ email, name, protocol, subject }) {
       if (!operationalRecipient) return Promise.resolve({ skipped: true });
       return send(operationalRecipient, `Novo atendimento Galatic · ${escapeHtml(protocol)}`, document("Novo atendimento recebido", "Uma nova mensagem aguarda resposta no painel administrativo.",
         `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}) enviou uma mensagem sobre <strong>${escapeHtml(subject)}</strong>.</p><p>Protocolo: <strong>${escapeHtml(protocol)}</strong>.</p>`,
-        { label: "Abrir atendimento", url: `${origin}/admin/atendimento/` }));
+        { label: "Abrir atendimento", url: `${origin}/admin/atendimento/` }, "community"));
     },
     sendOrderCreated({ email, name, orderId, totalCents, method }) {
       return send(email, `Pedido Galatic ${orderId.slice(0, 8).toUpperCase()}`, document("Pedido recebido", "Recebemos seu pedido e estamos acompanhando o pagamento.",
         `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>O pedido <strong>${escapeHtml(orderId)}</strong> foi registrado no valor de <strong>${money(totalCents)}</strong>.</p><p>Pagamento: ${method === "pix" ? "Pix à vista" : "cartão de crédito"}.</p>`,
-        { label: "Acompanhar pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
+        { label: "Acompanhar pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }, "order"));
     },
     sendPaymentConfirmed({ email, name, orderId }) {
       return send(email, "Pagamento confirmado · Galatic", document("Pagamento confirmado", "Seu pagamento foi confirmado e o pedido seguirá para preparação.",
         `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>O pagamento do pedido <strong>${escapeHtml(orderId)}</strong> foi confirmado. Agora começaremos a preparação para envio.</p>`,
-        { label: "Ver meu pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
+        { label: "Ver meu pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }, "order"));
     },
     sendPaymentCanceled({ email, name, orderId }) {
       return send(email, "Pedido cancelado · Galatic", document("Pedido cancelado", "A cobrança pendente foi cancelada com segurança.",
         `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>A cobrança do pedido <strong>${escapeHtml(orderId)}</strong> foi cancelada. Nenhum envio será realizado e o estoque reservado foi liberado.</p>`,
-        { label: "Voltar à loja", url: `${origin}/loja/` }));
+        { label: "Voltar à loja", url: `${origin}/loja/` }, "order"));
     },
     sendRefundRequested({ email, name, orderId }) {
       return send(email, "Estorno solicitado · Galatic", document("Estorno solicitado", "Recebemos a solicitação de devolução do pagamento.",
         `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>O estorno integral do pedido <strong>${escapeHtml(orderId)}</strong> foi solicitado ao processador de pagamento. Enviaremos outra atualização quando a devolução for confirmada.</p>`,
-        { label: "Acompanhar pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
+        { label: "Acompanhar pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }, "order"));
     },
     sendPaymentReversed({ email, name, orderId, reason }) {
       const chargeback = reason === "chargeback";
@@ -166,7 +193,7 @@ export function createGalaticNotifications(source = process.env) {
         document(chargeback ? "Pagamento contestado" : "Estorno confirmado",
           chargeback ? "O pagamento entrou em processo de contestação." : "A devolução do pagamento foi confirmada.",
           `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>${chargeback ? "Registramos uma contestação" : "O estorno foi confirmado"} para o pedido <strong>${escapeHtml(orderId)}</strong>.</p>`,
-          { label: "Ver pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
+          { label: "Ver pedido", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }, "order"));
     },
     sendShippingUpdate({ email, name, orderId, status, trackingCode, description }) {
       const label = shippingLabels[status] || "Atualização da entrega";
@@ -174,7 +201,7 @@ export function createGalaticNotifications(source = process.env) {
       const details = description ? `<p>${escapeHtml(description)}</p>` : "";
       return send(email, `${label} · Galatic`, document(label, `Novidades sobre a entrega do pedido ${orderId}.`,
         `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>Há uma atualização na entrega do pedido <strong>${escapeHtml(orderId)}</strong>.</p>${tracking}${details}`,
-        { label: "Acompanhar entrega", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }));
+        { label: "Acompanhar entrega", url: `${origin}/pedido/?order_id=${encodeURIComponent(orderId)}` }, "shipping"));
     },
     previewCustom({ subject, message }) {
       const body = `<p>${escapeHtml(message).replace(/\r?\n/g, "<br>")}</p>`;
