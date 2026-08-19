@@ -35,6 +35,18 @@ assert.equal(checkout.body.cardInstallmentMaximum, 10, "limite de parcelas diver
 assert.equal(checkout.body.cardInterest, "asaas_fees_passed_to_customer_from_2x", "política de juros divergente");
 assert.equal(checkout.body.cardInterestFreeInstallments, 1, "pagamento em 1x não está sem juros");
 assert.equal(checkout.body.pixInstallment, false, "Pix parcelado foi habilitado indevidamente");
+assert.equal(checkout.body.maximumItemQuantity, 3, "limite operacional por produto divergente");
+
+const catalog = await request("/v1/galatic/catalog/products");
+assert.equal(catalog.response.status, 200, "catálogo público indisponível");
+const activeProducts = Array.isArray(catalog.body?.products) ? catalog.body.products : Array.isArray(catalog.body) ? catalog.body : [];
+assert.ok(activeProducts.length > 0, "catálogo ativo vazio");
+assert.ok(activeProducts.every((product) => Number(product.unit_amount) > 0), "catálogo contém preço inválido");
+assert.deepEqual(
+  activeProducts.filter((product) => /^https?:\/\//i.test(String(product.image_url || ""))).map((product) => product.sku),
+  [],
+  "catálogo ativo ainda depende de imagens externas",
+);
 
 const shipping = await request("/v1/galatic/shipping/status");
 assert.equal(shipping.response.status, 200, "status de frete indisponível");
@@ -94,6 +106,8 @@ console.log(JSON.stringify({
   environment: checkout.body.environment,
   paymentMethods: checkout.body.methods,
   cardInstallments: preview.body.card.length,
+  activeProducts: activeProducts.length,
+  maximumItemQuantity: checkout.body.maximumItemQuantity,
   shipping: { provider: quote.body.provider, service: selectedQuote.service, amount: selectedQuote.amount, estimatedDays: selectedQuote.estimated_days },
   forbiddenMethods: ["boleto", "cash", "pix_installment"],
 }, null, 2));

@@ -172,3 +172,27 @@ test("rejects every forbidden Galatic payment method and card plans above 10x be
   assert.equal(providerCalls, 0);
   assert.equal(galaticStore.state.attached, null);
 });
+
+test("rejects quantities above three and duplicate SKU aggregation before touching Asaas", async (context) => {
+  let providerCalls = 0;
+  const galaticStore = store();
+  const asaasClient = {
+    findCustomersByDocument: async () => { providerCalls += 1; return { data: [] }; },
+    createCustomer: async () => { providerCalls += 1; return { id: "unexpected" }; },
+  };
+  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+    PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
+  { stores: { galatic: galaticStore }, asaasClient });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const checkout = async (items) => fetch(`http://127.0.0.1:${server.address().port}/v1/galatic/checkout/orders`, {
+    method: "POST", headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify({ items, payment: { method: "pix" } }),
+  });
+
+  assert.equal((await checkout([{ sku: "DEP001", quantity: 4 }])).status, 400);
+  const duplicate = await checkout([{ sku: "DEP001", quantity: 2 }, { sku: "DEP001", quantity: 2 }]);
+  assert.equal(duplicate.status, 400);
+  assert.equal((await duplicate.json()).error, "item_quantity_limit");
+  assert.equal(providerCalls, 0);
+});

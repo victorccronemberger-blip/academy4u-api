@@ -8,6 +8,8 @@ class GalaticInputError extends Error {
   constructor(message, code = "invalid_checkout") { super(message); this.code = code; }
 }
 
+const MAX_ITEM_QUANTITY = 3;
+
 function text(value, min, max, label) {
   const result = String(value ?? "").trim().replace(/\s+/g, " ");
   if (result.length < min || result.length > max) throw new GalaticInputError(`${label} inválido.`);
@@ -24,10 +26,14 @@ function items(input) {
   for (const item of input) {
     const key = String(item?.sku ?? item?.slug ?? "").trim();
     const quantity = Number(item?.quantity);
-    if (!/^[A-Za-z0-9_-]{2,100}$/.test(key) || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 10) {
+    if (!/^[A-Za-z0-9_-]{2,100}$/.test(key) || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_ITEM_QUANTITY) {
       throw new GalaticInputError("Item inválido no carrinho.");
     }
-    quantities.set(key, (quantities.get(key) ?? 0) + quantity);
+    const total = (quantities.get(key) ?? 0) + quantity;
+    if (total > MAX_ITEM_QUANTITY) {
+      throw new GalaticInputError(`O limite é de ${MAX_ITEM_QUANTITY} unidades por produto.`, "item_quantity_limit");
+    }
+    quantities.set(key, total);
   }
   return [...quantities].map(([key, quantity]) => ({ key, quantity }));
 }
@@ -161,7 +167,8 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
   }
   router.get("/status", (_request, response) => response.json({ enabled: environment.checkoutEnabled, provider: "asaas", environment: environment.asaasEnvironment,
     methods: environment.checkoutEnabled ? ["pix", "credit_card"] : [], cardMode: "embedded_api", cardInstallmentMaximum: 10,
-    cardInterest: "asaas_fees_passed_to_customer_from_2x", cardInterestFreeInstallments: 1, pixInstallment: false }));
+    cardInterest: "asaas_fees_passed_to_customer_from_2x", cardInterestFreeInstallments: 1, pixInstallment: false,
+    maximumItemQuantity: MAX_ITEM_QUANTITY }));
 
   router.post("/installments", readLimiter, async (request, response) => {
     if (!environment.checkoutEnabled || !asaasClient || !store.previewCheckout) {
