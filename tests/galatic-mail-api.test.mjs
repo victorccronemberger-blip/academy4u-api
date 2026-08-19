@@ -48,3 +48,32 @@ test("rejects a Hostinger token that cannot manage the configured mailbox", asyn
   });
   await assert.rejects(() => notifications.verify(), /não pertence ao token/);
 });
+
+test("renders every new Galatic lifecycle email with the official visual signature", async (context) => {
+  const deliveries = [];
+  context.mock.method(globalThis, "fetch", async (_url, options = {}) => {
+    deliveries.push(JSON.parse(options.body));
+    return new Response(null, { status: 204 });
+  });
+  const notifications = createGalaticNotifications({
+    GALATIC_MAIL_API_TOKEN: "secret-token",
+    GALATIC_MAIL_API_MAILBOX_ID: "AC_galatic",
+    GALATIC_ADMIN_EMAIL: "comercial@galatic.com.br",
+    GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
+  });
+  const customer = { first_name: "Victor", email: "victor@example.com" };
+  await notifications.sendWelcome({ customer });
+  await notifications.sendPasswordChanged({ customer });
+  await notifications.sendNewsletterConfirmed({ email: customer.email });
+  await notifications.sendContactReceived({ email: customer.email, name: "Victor", protocol: "GAL-123", subject: "Meu pedido" });
+  await notifications.sendContactAlert({ email: customer.email, name: "Victor", protocol: "GAL-123", subject: "Meu pedido" });
+
+  assert.equal(deliveries.length, 5);
+  assert.deepEqual(deliveries.map((item) => item.to[0]), [
+    customer.email, customer.email, customer.email, customer.email, "comercial@galatic.com.br",
+  ]);
+  for (const delivery of deliveries) {
+    assert.match(delivery.html, /galatic-wordmark-email-v2\.png/);
+    assert.doesNotMatch(delivery.html, /<div[^>]*>GALATIC<\/div>/);
+  }
+});

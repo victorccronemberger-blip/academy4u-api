@@ -91,6 +91,10 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
   router.post("/auth/verify-email", authLimiter, async (request, response) => {
     const customerId = await store.consumeCustomerToken(tokenHash(request.body?.token), "verify_email");
     if (!customerId) return response.status(400).json({ error: "invalid_token", message: "O link expirou ou já foi utilizado." });
+    const customer = await store.getCustomerById(customerId);
+    notifications?.sendWelcome?.({ customer }).catch((error) => {
+      console.error("Could not send Galatic welcome email", { type: error?.name, code: error?.code });
+    });
     return response.json({ message: "E-mail confirmado com sucesso." });
   });
   router.post("/auth/forgot-password", authLimiter, async (request, response) => {
@@ -112,6 +116,10 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
     if (!customerId) return response.status(400).json({ error: "invalid_token", message: "O link expirou ou já foi utilizado." });
     await store.updateCustomerPassword(customerId, await hashPassword(request.body.password));
     await store.revokeOtherCustomerSessions(customerId);
+    const customer = await store.getCustomerById(customerId);
+    notifications?.sendPasswordChanged?.({ customer }).catch((error) => {
+      console.error("Could not send Galatic password confirmation", { type: error?.name, code: error?.code });
+    });
     return response.json({ message: "Senha atualizada. Entre novamente com sua nova senha." });
   });
 
@@ -133,6 +141,9 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
     catch (error) { return response.status(400).json({ error: error.code, message: error.message }); }
     await store.updateCustomerPassword(customer.id, await hashPassword(request.body.new_password));
     await store.revokeOtherCustomerSessions(customer.id, request.galaticSessionId);
+    notifications?.sendPasswordChanged?.({ customer }).catch((error) => {
+      console.error("Could not send Galatic password confirmation", { type: error?.name, code: error?.code });
+    });
     return response.json({ updated: true });
   });
   router.get("/account/orders", authenticate, async (request, response) => response.json({ orders: await store.listCustomerOrders(request.galaticCustomer) }));

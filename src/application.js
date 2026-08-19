@@ -391,6 +391,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       }));
       app.use("/v1/galatic", ...middleware, createGalaticPublicRouter(express, {
         store: context.store,
+        notifications: galaticNotifications,
       }));
       app.use(`/health/${context.tenant.id}`, createHealthRouter(
         express,

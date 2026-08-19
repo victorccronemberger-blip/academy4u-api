@@ -3,7 +3,7 @@ import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 
 const clean = (value, maximum) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maximum);
 
-export function createGalaticPublicRouter(express, { store }) {
+export function createGalaticPublicRouter(express, { store, notifications = null }) {
   const router = express.Router();
   const writeLimiter = createFixedWindowLimiter({ limit: 20, windowMs: 60_000, prefix: "galatic-public-write" });
 
@@ -23,6 +23,9 @@ export function createGalaticPublicRouter(express, { store }) {
       const email = normalizeEmail(request.body?.email);
       if (request.body?.consent !== true) throw new Error("Confirme que deseja receber as novidades.");
       await store.upsertNewsletter(email, true);
+      notifications?.sendNewsletterConfirmed?.({ email }).catch((error) => {
+        console.error("Could not send Galatic newsletter email", { type: error?.name, code: error?.code });
+      });
       return response.json({ message: "Inscrição confirmada. Você já está na Carta da Mesa." });
     } catch (error) { return response.status(400).json({ error: "invalid_newsletter", message: error.message }); }
   });
@@ -33,6 +36,12 @@ export function createGalaticPublicRouter(express, { store }) {
       const subject = clean(request.body?.subject, 180); const message = clean(request.body?.message, 5000);
       if (name.length < 2 || subject.length < 3 || message.length < 10) throw new Error("Complete os dados da mensagem.");
       const protocol = await store.createContactMessage({ name, email, subject, message });
+      notifications?.sendContactReceived?.({ email, name, protocol, subject }).catch((error) => {
+        console.error("Could not send Galatic contact receipt", { type: error?.name, code: error?.code });
+      });
+      notifications?.sendContactAlert?.({ email, name, protocol, subject }).catch((error) => {
+        console.error("Could not send Galatic contact alert", { type: error?.name, code: error?.code });
+      });
       return response.status(201).json({ message: "Mensagem recebida pela equipe Galatic.", protocol });
     } catch (error) { return response.status(400).json({ error: "invalid_contact", message: error.message }); }
   });

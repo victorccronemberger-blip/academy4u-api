@@ -70,6 +70,7 @@ export function createGalaticNotifications(source = process.env) {
     auth: smtp.auth, disableFileAccess: true, disableUrlAccess: true }) : null;
   const from = smtp ? `"${smtp.name.replace(/[\r\n"]/g, "")}" <${smtp.from}>` : null;
   const origin = source.GALATIC_PUBLIC_ORIGIN?.trim() || "https://galatic.com.br";
+  const operationalRecipient = source.GALATIC_ADMIN_EMAIL?.trim() || null;
   const send = hostinger
     ? (to, subject, html) => hostingerRequest(hostinger,
       `/api/v1/mailboxes/${encodeURIComponent(hostinger.mailboxResourceId)}/send`, {
@@ -95,11 +96,37 @@ export function createGalaticNotifications(source = process.env) {
         `<p>Olá, <strong>${escapeHtml(customer.first_name)}</strong>.</p><p>Sua conta Galatic foi criada. Confirme o endereço de e-mail para proteger seu acesso e acompanhar seus pedidos.</p>`,
         { label: "Confirmar meu e-mail", url }));
     },
+    sendWelcome({ customer }) {
+      return send(customer.email, "Conta confirmada · Galatic", document("Sua conta está pronta", "Seu e-mail foi confirmado e sua conta Galatic já está protegida.",
+        `<p>Olá, <strong>${escapeHtml(customer.first_name)}</strong>.</p><p>Seu e-mail foi confirmado. Agora você pode salvar favoritos, acompanhar pedidos e manter seus dados de entrega organizados em um só lugar.</p>`,
+        { label: "Acessar minha conta", url: `${origin}/minha-conta/` }));
+    },
     sendPasswordReset({ customer, token }) {
       const url = `${origin}/recuperar-acesso/?token=${encodeURIComponent(token)}`;
       return send(customer.email, "Redefinição de senha Galatic", document("Redefina sua senha", "Recebemos uma solicitação de recuperação de acesso.",
         `<p>Olá, <strong>${escapeHtml(customer.first_name)}</strong>.</p><p>Use o botão abaixo para criar uma nova senha. O link expira em 1 hora.</p>`,
         { label: "Criar nova senha", url }));
+    },
+    sendPasswordChanged({ customer }) {
+      return send(customer.email, "Senha alterada · Galatic", document("Sua senha foi alterada", "A senha da sua conta Galatic foi atualizada com sucesso.",
+        `<p>Olá, <strong>${escapeHtml(customer.first_name)}</strong>.</p><p>Sua senha foi alterada. Se você não realizou essa mudança, recupere o acesso imediatamente e entre em contato com a Galatic.</p>`,
+        { label: "Entrar na minha conta", url: `${origin}/entrar/` }));
+    },
+    sendNewsletterConfirmed({ email }) {
+      return send(email, "Inscrição confirmada · Carta da Mesa", document("Bem-vindo à Carta da Mesa", "Sua inscrição nas novidades da Galatic foi confirmada.",
+        `<p>Sua inscrição está ativa.</p><p>Você receberá seleções de jogos, guias e novidades da Galatic. Nada de excesso: somente conteúdo útil para escolher melhor a próxima partida.</p>`,
+        { label: "Explorar a Galatic", url: `${origin}/loja/` }));
+    },
+    sendContactReceived({ email, name, protocol, subject }) {
+      return send(email, `Recebemos sua mensagem · ${escapeHtml(protocol)}`, document("Mensagem recebida", "A equipe Galatic recebeu sua solicitação.",
+        `<p>Olá, <strong>${escapeHtml(name)}</strong>.</p><p>Registramos sua mensagem sobre <strong>${escapeHtml(subject)}</strong>.</p><p>Protocolo: <strong>${escapeHtml(protocol)}</strong>.</p><p>Responderemos pelo mesmo endereço de e-mail.</p>`,
+        { label: "Central de ajuda", url: `${origin}/ajuda/` }));
+    },
+    sendContactAlert({ email, name, protocol, subject }) {
+      if (!operationalRecipient) return Promise.resolve({ skipped: true });
+      return send(operationalRecipient, `Novo atendimento Galatic · ${escapeHtml(protocol)}`, document("Novo atendimento recebido", "Uma nova mensagem aguarda resposta no painel administrativo.",
+        `<p><strong>${escapeHtml(name)}</strong> (${escapeHtml(email)}) enviou uma mensagem sobre <strong>${escapeHtml(subject)}</strong>.</p><p>Protocolo: <strong>${escapeHtml(protocol)}</strong>.</p>`,
+        { label: "Abrir atendimento", url: `${origin}/admin/atendimento/` }));
     },
     sendOrderCreated({ email, name, orderId, totalCents, method }) {
       return send(email, `Pedido Galatic ${orderId.slice(0, 8).toUpperCase()}`, document("Pedido recebido", "Recebemos seu pedido e estamos acompanhando o pagamento.",
