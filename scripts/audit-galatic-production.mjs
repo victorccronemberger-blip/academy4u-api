@@ -39,7 +39,8 @@ assert.equal(checkout.body.maximumItemQuantity, 3, "limite operacional por produ
 
 const catalog = await request("/v1/galatic/catalog/products");
 assert.equal(catalog.response.status, 200, "catálogo público indisponível");
-const activeProducts = Array.isArray(catalog.body?.products) ? catalog.body.products : Array.isArray(catalog.body) ? catalog.body : [];
+const catalogProducts = Array.isArray(catalog.body?.products) ? catalog.body.products : Array.isArray(catalog.body) ? catalog.body : [];
+const activeProducts = catalogProducts.filter((product) => Number(product.active) === 1);
 assert.ok(activeProducts.length > 0, "catálogo ativo vazio");
 assert.ok(activeProducts.every((product) => Number(product.unit_amount) > 0), "catálogo contém preço inválido");
 assert.deepEqual(
