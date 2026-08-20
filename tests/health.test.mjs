@@ -63,8 +63,6 @@ test("reports a healthy API while keeping checkout disabled without Asaas creden
   assert.deepEqual(await response.json(), {
     status: "ok",
     service: "academy-api",
-    database: { status: "ready", error: null },
-    capabilities: { checkout: false },
   });
 
   const status = await fetch(`${origin}/v1/checkout/status`);

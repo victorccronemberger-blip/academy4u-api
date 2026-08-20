@@ -87,6 +87,5 @@ test("keeps tenant routes and browser origins isolated", async (context) => {
   const health = await fetch(`${base}/health`);
   assert.equal(health.status, 200);
   const body = await health.json();
-  assert.equal(body.platforms.academy4u.database, "ready");
-  assert.equal(body.platforms.galatic.database, "ready");
+  assert.deepEqual(body, { status: "ok", service: "payments-api" });
 });

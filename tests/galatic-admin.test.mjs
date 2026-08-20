@@ -57,6 +57,7 @@ test("does not declare production readiness while Galatic payments are still in 
   const baseEnvironment = {
     ASAAS_ENABLED: "true", PAYMENT_TENANTS: "galatic",
     GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
+    GALATIC_DATA_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     GALATIC_DATABASE_URL: "mysql://galatic:test@127.0.0.1/galatic",
     GALATIC_ENVIA_API_KEY: "envia_test", GALATIC_ENVIA_ENVIRONMENT: "production",
     GALATIC_ENVIA_WEBHOOK_TOKEN: "envia-webhook-token",

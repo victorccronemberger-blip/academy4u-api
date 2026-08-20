@@ -1,5 +1,7 @@
 import { hashPassword, normalizeEmail, opaqueToken, tokenHash, verifyPassword } from "../domain/password.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
+import { allowBodyFields } from "../http/request-security.js";
+import { ADMIN_SESSION_COOKIE, clearSessionCookie, sessionCredential, setSessionCookie } from "../http/session-cookie.js";
 import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 
 const clean = (value, maximum = 255) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maximum);
@@ -15,8 +17,15 @@ const decimal = (value, minimum = 0) => {
 const enabled = (value) => value === true || value === 1 || value === "1" || value === "true" || value === "on";
 const expiresAt = (milliseconds) => new Date(Date.now() + milliseconds).toISOString().slice(0, 23).replace("T", " ");
 
-function bearer(request) {
-  return String(request.get("authorization") ?? "").match(/^Bearer\s+([A-Za-z0-9_-]{32,})$/i)?.[1] ?? null;
+function safeUrl(value, { local = false } = {}) {
+  const raw = clean(value, 1000);
+  if (!raw) return "";
+  if (local && /^\/(?!\/)[A-Za-z0-9._~!$&'()*+,;=:@%/?#-]+$/.test(raw)) return raw;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "https:" && !parsed.username && !parsed.password) return parsed.href;
+  } catch {}
+  throw Object.assign(new Error("Informe uma URL HTTPS válida."), { code: "invalid_url" });
 }
 
 function adminView(admin) {
@@ -37,7 +46,8 @@ function productInput(body, existingSku = null) {
     widthCm: decimal(body?.width_cm, 0.1), heightCm: decimal(body?.height_cm, 0.1),
   };
   return { sku, slug, name, unitAmount, costAmount, description: clean(body?.description, 20_000),
-    imageUrl: clean(body?.image_url ?? body?.image, 1000), sourceUrl: clean(body?.source_url ?? body?.source, 1000),
+    imageUrl: safeUrl(body?.image_url ?? body?.image, { local: true }),
+    sourceUrl: safeUrl(body?.source_url ?? body?.source),
     category: clean(body?.category, 120), brand: clean(body?.brand, 120), active: enabled(body?.active),
     manageStock: enabled(body?.manage_stock ?? body?.manage), stockQuantity: integer(body?.stock_quantity ?? body?.stock),
     ...logistics, editorialStatus: clean(body?.editorial_status, 24) || "draft" };
@@ -58,7 +68,14 @@ function couponInput(body) {
 
 export function createGalaticAdminRouter(express, { environment, store, notifications = null, fulfillment = null, asaasClient = null }) {
   const router = express.Router();
-  const authLimiter = createFixedWindowLimiter({ limit: 10, windowMs: 60_000, prefix: "galatic-admin-auth" });
+  const authLimiter = createFixedWindowLimiter({ limit: 10, windowMs: 60_000, prefix: "galatic-admin-auth-ip" });
+  const identityLimiter = createFixedWindowLimiter({
+    limit: 5,
+    windowMs: 15 * 60_000,
+    prefix: "galatic-admin-auth-identity",
+    keyGenerator: (request) => `${request.ip}:${tokenHash(String(request.body?.email ?? "").trim().toLowerCase())}`,
+  });
+  const dummyPasswordHash = hashPassword("GalaticDummyAdminPassword2026");
 
   async function notifyOnce(orderId, key, method, extra = {}) {
     if (!notifications?.[method] || !store.getOrderNotification) return;
@@ -72,15 +89,16 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   }
 
   async function authenticate(request, response, next) {
-    const token = bearer(request);
-    const admin = token ? await store.adminForSession(tokenHash(token)) : null;
+    const credential = sessionCredential(request, ADMIN_SESSION_COOKIE);
+    const admin = credential ? await store.adminForSession(tokenHash(credential.token)) : null;
     if (!admin) return response.status(401).json({ error: "unauthorized", message: "Acesso administrativo não autorizado." });
     request.galaticAdmin = admin;
-    request.galaticAdminTokenHash = tokenHash(token);
+    request.galaticAdminTokenHash = tokenHash(credential.token);
     return next();
   }
 
-  router.post("/login", authLimiter, async (request, response) => {
+  router.post("/login", authLimiter, identityLimiter, allowBodyFields(["email", "password", "website"]), async (request, response) => {
+    if (request.body?.website) return response.status(401).json({ error: "invalid_credentials", message: "E-mail ou senha incorretos." });
     let email;
     try { email = normalizeEmail(request.body?.email); }
     catch { return response.status(401).json({ error: "invalid_credentials", message: "E-mail ou senha incorretos." }); }
@@ -90,16 +108,20 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
         passwordHash: await hashPassword(environment.galaticAdminPassword) });
       admin = await store.getAdminByEmail(email, { includePassword: true });
     }
-    if (!admin || admin.status !== "active" || !(await verifyPassword(request.body?.password, admin.password_hash))) {
+    const validPassword = await verifyPassword(request.body?.password, admin?.password_hash ?? await dummyPasswordHash);
+    if (!admin || admin.status !== "active" || !validPassword) {
       return response.status(401).json({ error: "invalid_credentials", message: "E-mail ou senha incorretos." });
     }
     const accessToken = opaqueToken();
     await store.createAdminSession({ adminId: admin.id, tokenHash: tokenHash(accessToken), expiresAt: expiresAt(12 * 3600000) });
+    setSessionCookie(response, ADMIN_SESSION_COOKIE, accessToken, 12 * 3600);
     return response.json({ admin: adminView(admin), access_token: accessToken, token_type: "Bearer", expires_in: 43_200 });
   });
   router.get("/me", authenticate, (request, response) => response.json({ admin: adminView(request.galaticAdmin) }));
   router.post("/logout", authenticate, async (request, response) => {
-    await store.revokeAdminSession(request.galaticAdminTokenHash); return response.json({ logged_out: true });
+    await store.revokeAdminSession(request.galaticAdminTokenHash);
+    clearSessionCookie(response, ADMIN_SESSION_COOKIE);
+    return response.json({ logged_out: true });
   });
 
   router.use(authenticate);
@@ -310,6 +332,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
         passed: Boolean(environment.galaticEnviaWebhookSecret || environment.galaticEnviaWebhookToken) },
       { key: "catalog", label: "Catálogo com logística completa", required: true, passed: catalog.active_products > 0 && catalog.missing_weight === 0 && catalog.missing_dimensions === 0 },
       { key: "email", label: "E-mail transacional", required: true, passed: Boolean(notifications?.ready) },
+      { key: "pii_encryption", label: "Criptografia de dados pessoais", required: true,
+        passed: Boolean(environment.galaticDataEncryptionKey) },
     ];
     const sandboxReady = checks
       .filter((item) => item.key !== "payment_environment")

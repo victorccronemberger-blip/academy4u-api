@@ -10,15 +10,8 @@ export function createHealthRouter(
     await waitForReady();
     const available = readiness.status === "ready";
     response.status(available ? 200 : 503).json({
-      status: available ? "ok" : readiness.status,
+      status: available ? "ok" : "unavailable",
       service: "academy-api",
-      database: {
-        status: readiness.status,
-        error: readiness.error,
-      },
-      capabilities: {
-        checkout: available && environment.checkoutEnabled,
-      },
     });
   });
 

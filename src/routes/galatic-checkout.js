@@ -3,12 +3,22 @@ import { normalizeBrazilianTaxId } from "../domain/brazilian-tax-id.js";
 import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 import { CreditCardInputError, cardHolderInfo, parseCreditCard } from "../domain/credit-card.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
+import { allowBodyFields } from "../http/request-security.js";
 
 class GalaticInputError extends Error {
   constructor(message, code = "invalid_checkout") { super(message); this.code = code; }
 }
 
 const MAX_ITEM_QUANTITY = 3;
+
+function exactObject(value, fields, label) {
+  if (!value || Array.isArray(value) || typeof value !== "object") throw new GalaticInputError(`${label} inválido.`);
+  const allowed = new Set(fields);
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw new GalaticInputError(`${label} contém campos não permitidos.`, "unexpected_fields");
+  }
+  return value;
+}
 
 function text(value, min, max, label) {
   const result = String(value ?? "").trim().replace(/\s+/g, " ");
@@ -24,6 +34,7 @@ function items(input) {
   if (!Array.isArray(input) || !input.length || input.length > 20) throw new GalaticInputError("Carrinho inválido.");
   const quantities = new Map();
   for (const item of input) {
+    exactObject(item, ["sku", "slug", "quantity"], "Item");
     const key = String(item?.sku ?? item?.slug ?? "").trim();
     const quantity = Number(item?.quantity);
     if (!/^[A-Za-z0-9_-]{2,100}$/.test(key) || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_ITEM_QUANTITY) {
@@ -38,12 +49,14 @@ function items(input) {
   return [...quantities].map(([key, quantity]) => ({ key, quantity }));
 }
 function buyer(input) {
+  exactObject(input, ["firstName", "lastName", "email", "phone", "documentNumber", "address"], "Comprador");
   const firstName = text(input?.firstName, 2, 80, "Nome");
   const lastName = text(input?.lastName, 2, 100, "Sobrenome");
   const email = String(input?.email ?? "").trim().toLowerCase();
   if (email.length > 160 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new GalaticInputError("E-mail inválido.");
   const address = input?.address;
-  if (!address || typeof address !== "object") throw new GalaticInputError("Endereço inválido.");
+  exactObject(address, ["postCode", "postalCode", "postal_code", "cep", "street", "logradouro", "number", "numero",
+    "complement", "complemento", "district", "bairro", "city", "cidade", "state", "uf"], "Endereço");
   const state = text(address.state ?? address.uf, 2, 2, "UF").toUpperCase();
   const normalizedAddress = {
     postCode: digits(address.postCode ?? address.postalCode ?? address.postal_code ?? address.cep, 8, 8, "CEP"),
@@ -81,6 +94,7 @@ function pix(result) {
 }
 
 function payment(input) {
+  exactObject(input, ["method", "installments", "card"], "Pagamento");
   if (input?.method === "pix") return { method: "pix", installments: 1, card: null };
   if (input?.method !== "credit_card") throw new GalaticInputError("Escolha Pix ou cartão de crédito.", "invalid_payment_method");
   const installments = Number(input.installments ?? 1);
@@ -125,7 +139,8 @@ function simulatedCardPricing(baseCents, installments, simulation) {
     installmentCents: Math.ceil(totalCents / installments), source: "asaas_sales_simulator" };
 }
 
-export function createGalaticCheckoutRouter(express, { environment, asaasClient, store, notifications = null }) {
+export function createGalaticCheckoutRouter(express, { environment, asaasClient, store, notifications = null,
+  botChallenge = { verify: (_request, _response, next) => next() } }) {
   const router = express.Router();
   const writeLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 12, prefix: "galatic-checkout" });
   const readLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 60, prefix: "galatic-order" });
@@ -170,12 +185,14 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
     cardInterest: "asaas_fees_passed_to_customer_from_2x", cardInterestFreeInstallments: 1, pixInstallment: false,
     maximumItemQuantity: MAX_ITEM_QUANTITY }));
 
-  router.post("/installments", readLimiter, async (request, response) => {
+  router.post("/installments", readLimiter,
+    allowBodyFields(["items", "shipping", "couponCode", "buyerEmail"]), async (request, response) => {
     if (!environment.checkoutEnabled || !asaasClient || !store.previewCheckout) {
       return response.status(503).json({ error: "checkout_unavailable", message: "Condições de pagamento temporariamente indisponíveis." });
     }
     try {
       const cart = items(request.body?.items);
+      exactObject(request.body?.shipping, ["quoteId"], "Frete");
       const quoteId = String(request.body?.shipping?.quoteId ?? "").trim();
       if (!/^[0-9a-f-]{36}$/i.test(quoteId)) throw new GalaticInputError("Frete ausente ou expirado.", "invalid_shipping_quote");
       const couponCode = String(request.body?.couponCode ?? "").trim().toUpperCase() || null;
@@ -197,15 +214,21 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       if (["invalid_coupon", "invalid_email"].includes(error?.code)) {
         return response.status(400).json({ error: error.code, message: error.message === "invalid_coupon" ? "Cupom inválido, expirado ou indisponível para esta compra." : error.message });
       }
+      if (error instanceof GalaticInputError) {
+        return response.status(400).json({ error: error.code, message: error.message });
+      }
       throw error;
     }
   });
 
-  router.post("/orders", writeLimiter, async (request, response) => {
+  router.post("/orders", writeLimiter, botChallenge.verify,
+    allowBodyFields(["items", "buyer", "shipping", "payment", "couponCode", "website"]), async (request, response) => {
+    if (request.body?.website) return response.status(400).json({ error: "invalid_checkout", message: "Não foi possível validar a solicitação." });
     if (!environment.checkoutEnabled || !asaasClient) return response.status(503).json({ error: "checkout_unavailable", message: "Pagamento temporariamente indisponível." });
     let key; let cart; let customer; let quoteId; let selectedPayment;
     try {
       key = uuid(request); cart = items(request.body?.items); customer = buyer(request.body?.buyer);
+      exactObject(request.body?.shipping, ["quoteId"], "Frete");
       quoteId = String(request.body?.shipping?.quoteId ?? "").trim();
       if (!/^[0-9a-f-]{36}$/i.test(quoteId)) throw new GalaticInputError("Frete ausente ou expirado.", "invalid_shipping_quote");
       selectedPayment = payment(request.body?.payment);

@@ -1,6 +1,7 @@
 import mysql from "mysql2/promise";
 import { randomUUID } from "node:crypto";
 import { hardenedPoolOptions } from "./pool-options.js";
+import { createSensitiveDataCipher } from "../domain/sensitive-data.js";
 
 const FINAL_PAYMENT_STATUSES = new Set(["refunded", "chargeback", "canceled"]);
 
@@ -10,7 +11,7 @@ function nextPaymentStatus(current, incoming) {
   return current === "paid" ? current : incoming;
 }
 
-function customerView(row) {
+function customerView(row, decrypt = (value) => value) {
   if (!row) return null;
   return {
     id: row.id,
@@ -18,9 +19,10 @@ function customerView(row) {
     last_name: row.last_name,
     name: `${row.first_name} ${row.last_name}`.trim(),
     email: row.email,
-    phone: row.phone ?? "",
+    phone: decrypt(row.phone ?? ""),
     email_verified: Boolean(row.email_verified_at),
     marketing_consent: Boolean(row.marketing_consent),
+    status: row.status ?? "active",
     created_at: row.created_at,
   };
 }
@@ -28,7 +30,8 @@ function customerView(row) {
 // This store is intentionally independent from the Academy/LMS schema.  It
 // owns physical-product data only; no runtime query may target courses,
 // settings, users, enrollments or any remote catalogue service.
-export function createGalaticMySqlStore(databaseUrl) {
+export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null } = {}) {
+  const sensitive = createSensitiveDataCipher(dataEncryptionKey);
   const url = new URL(databaseUrl);
   const pool = mysql.createPool({
     host: url.hostname,
@@ -251,6 +254,50 @@ export function createGalaticMySqlStore(databaseUrl) {
         "ALTER TABLE galatic_newsletter_subscribers ADD COLUMN IF NOT EXISTS action_token_expires_at DATETIME(3) NULL AFTER action_token_hash",
         "ALTER TABLE galatic_customers ADD COLUMN IF NOT EXISTS status VARCHAR(24) NOT NULL DEFAULT 'active' AFTER newsletter_status",
       ]) await pool.query(alteration);
+
+      const sensitiveColumns = [
+        ["galatic_orders", "buyer_document", "TEXT NULL"],
+        ["galatic_orders", "buyer_phone", "TEXT NULL"],
+        ["galatic_customers", "phone", "TEXT NULL"],
+        ["galatic_customer_addresses", "federal_tax_id", "TEXT NULL"],
+        ["galatic_customer_addresses", "postal_code", "TEXT NOT NULL"],
+        ["galatic_customer_addresses", "street", "TEXT NOT NULL"],
+        ["galatic_customer_addresses", "number", "TEXT NOT NULL"],
+        ["galatic_customer_addresses", "complement", "TEXT NULL"],
+        ["galatic_customer_addresses", "district", "TEXT NOT NULL"],
+        ["galatic_customer_addresses", "city", "TEXT NOT NULL"],
+      ];
+      for (const [table, column, definition] of sensitiveColumns) {
+        const [[metadata]] = await pool.query(
+          "SELECT DATA_TYPE data_type FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?",
+          [table, column],
+        );
+        if (metadata?.data_type !== "text") await pool.query(`ALTER TABLE \`${table}\` MODIFY COLUMN \`${column}\` ${definition}`);
+      }
+
+      if (sensitive.configured) {
+        const [customers] = await pool.query("SELECT id,phone FROM galatic_customers WHERE phone IS NOT NULL AND phone<>'' AND phone NOT LIKE 'enc:v1:%'");
+        for (const row of customers) await pool.query("UPDATE galatic_customers SET phone=? WHERE id=?", [sensitive.encrypt(row.phone), row.id]);
+        const [orders] = await pool.query(
+          "SELECT id,buyer_document,buyer_phone,shipping_address_json FROM galatic_orders WHERE (buyer_document IS NOT NULL AND buyer_document NOT LIKE 'enc:v1:%') OR (buyer_phone IS NOT NULL AND buyer_phone NOT LIKE 'enc:v1:%') OR JSON_EXTRACT(shipping_address_json,'$._encrypted') IS NULL",
+        );
+        for (const row of orders) {
+          const document = sensitive.isEncrypted(row.buyer_document) ? row.buyer_document : sensitive.encrypt(row.buyer_document);
+          const phone = sensitive.isEncrypted(row.buyer_phone) ? row.buyer_phone : sensitive.encrypt(row.buyer_phone);
+          const address = sensitive.decryptJson(row.shipping_address_json);
+          await pool.query("UPDATE galatic_orders SET buyer_document=?,buyer_phone=?,shipping_address_json=? WHERE id=?",
+            [document || null, phone || null, JSON.stringify(sensitive.encryptJson(address)), row.id]);
+        }
+        const [addresses] = await pool.query(
+          "SELECT id,federal_tax_id,postal_code,street,number,complement,district,city FROM galatic_customer_addresses WHERE postal_code NOT LIKE 'enc:v1:%'",
+        );
+        for (const row of addresses) await pool.query(
+          "UPDATE galatic_customer_addresses SET federal_tax_id=?,postal_code=?,street=?,number=?,complement=?,district=?,city=? WHERE id=?",
+          [row.federal_tax_id ? sensitive.encrypt(row.federal_tax_id) : null, sensitive.encrypt(row.postal_code),
+            sensitive.encrypt(row.street), sensitive.encrypt(row.number), row.complement ? sensitive.encrypt(row.complement) : null,
+            sensitive.encrypt(row.district), sensitive.encrypt(row.city), row.id],
+        );
+      }
 
       // A loja Galatic já possuía um catálogo operacional na tabela `products`
       // antes da consolidação do gateway. Na primeira inicialização, copie esse
@@ -505,8 +552,10 @@ export function createGalaticMySqlStore(databaseUrl) {
            (id,customer_id,payment_provider,payment_status,payment_method,installments,buyer_email,buyer_name,buyer_document,buyer_phone,shipping_address_json,
             shipping_quote_id,subtotal_cents,shipping_cents,discount_cents,coupon_code,total_cents)
            VALUES (?,?,'asaas','pending',?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [orderId, matchedCustomer?.id ?? null, paymentMethod, installments, buyer.email, buyer.name, buyer.document, buyer.phone,
-            JSON.stringify(buyer.address), quoteId, subtotalCents, shippingCents, discountCents, normalizedCoupon, totalCents],
+          [orderId, matchedCustomer?.id ?? null, paymentMethod, installments, buyer.email, buyer.name,
+            sensitive.encrypt(buyer.document), sensitive.encrypt(buyer.phone),
+            JSON.stringify(sensitive.encryptJson(buyer.address)), quoteId, subtotalCents, shippingCents,
+            discountCents, normalizedCoupon, totalCents],
         );
         for (const line of lines) {
           const lineTotal = Number(line.product.unit_amount_cents) * line.quantity;
@@ -740,7 +789,7 @@ export function createGalaticMySqlStore(databaseUrl) {
           `INSERT INTO galatic_customers
            (id,first_name,last_name,email,phone,password_hash,marketing_consent,newsletter_enabled,newsletter_status)
            VALUES (?,?,?,?,?,?,?,? ,?)`,
-          [id, firstName, lastName, email, phone || null, passwordHash, marketingConsent ? 1 : 0,
+          [id, firstName, lastName, email, phone ? sensitive.encrypt(phone) : null, passwordHash, marketingConsent ? 1 : 0,
             marketingConsent ? 1 : 0, marketingConsent ? "active" : "disabled"],
         );
       } catch (error) {
@@ -752,18 +801,18 @@ export function createGalaticMySqlStore(databaseUrl) {
     async getCustomerByEmail(email, { includePassword = false } = {}) {
       await ensureSchema();
       const [[row]] = await pool.query(
-        `SELECT id,first_name,last_name,email,phone,email_verified_at,marketing_consent,created_at${includePassword ? ",password_hash" : ""}
+        `SELECT id,first_name,last_name,email,phone,email_verified_at,marketing_consent,status,created_at${includePassword ? ",password_hash" : ""}
          FROM galatic_customers WHERE email=?`, [email],
       );
-      return row ? { ...customerView(row), ...(includePassword ? { password_hash: row.password_hash } : {}) } : null;
+      return row ? { ...customerView(row, sensitive.decrypt), ...(includePassword ? { password_hash: row.password_hash } : {}) } : null;
     },
     async getCustomerById(id, { includePassword = false } = {}) {
       await ensureSchema();
       const [[row]] = await pool.query(
-        `SELECT id,first_name,last_name,email,phone,email_verified_at,marketing_consent,created_at${includePassword ? ",password_hash" : ""}
+        `SELECT id,first_name,last_name,email,phone,email_verified_at,marketing_consent,status,created_at${includePassword ? ",password_hash" : ""}
          FROM galatic_customers WHERE id=?`, [id],
       );
-      return row ? { ...customerView(row), ...(includePassword ? { password_hash: row.password_hash } : {}) } : null;
+      return row ? { ...customerView(row, sensitive.decrypt), ...(includePassword ? { password_hash: row.password_hash } : {}) } : null;
     },
     async createCustomerSession({ customerId, tokenHash, expiresAt }) {
       await ensureSchema();
@@ -777,13 +826,13 @@ export function createGalaticMySqlStore(databaseUrl) {
     async customerForSession(tokenHash) {
       await ensureSchema();
       const [[row]] = await pool.query(
-        `SELECT c.id,c.first_name,c.last_name,c.email,c.phone,c.email_verified_at,c.marketing_consent,c.created_at,s.id session_id
+        `SELECT c.id,c.first_name,c.last_name,c.email,c.phone,c.email_verified_at,c.marketing_consent,c.status,c.created_at,s.id session_id
          FROM galatic_customer_sessions s JOIN galatic_customers c ON c.id=s.customer_id
-         WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>UTC_TIMESTAMP(3)`, [tokenHash],
+         WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>UTC_TIMESTAMP(3) AND c.status='active'`, [tokenHash],
       );
       if (!row) return null;
       await pool.query("UPDATE galatic_customer_sessions SET last_seen_at=UTC_TIMESTAMP(3) WHERE id=?", [row.session_id]);
-      return { customer: customerView(row), sessionId: row.session_id };
+      return { customer: customerView(row, sensitive.decrypt), sessionId: row.session_id };
     },
     async revokeCustomerSession(tokenHash) {
       await ensureSchema();
@@ -799,7 +848,8 @@ export function createGalaticMySqlStore(databaseUrl) {
     },
     async updateCustomerProfile(customerId, { firstName, lastName, phone }) {
       await ensureSchema();
-      await pool.query("UPDATE galatic_customers SET first_name=?,last_name=?,phone=? WHERE id=?", [firstName, lastName, phone || null, customerId]);
+      await pool.query("UPDATE galatic_customers SET first_name=?,last_name=?,phone=? WHERE id=?",
+        [firstName, lastName, phone ? sensitive.encrypt(phone) : null, customerId]);
       return this.getCustomerById(customerId);
     },
     async updateCustomerPassword(customerId, passwordHash) {
@@ -874,7 +924,7 @@ export function createGalaticMySqlStore(databaseUrl) {
         payment_status: order.payment_status, payment_method: order.payment_method, installments: Number(order.installments),
         shipping_status: order.fulfillment_status, shipping_service_name: order.shipping_service_name,
         tracking_code: order.tracking_code, customer_name: order.buyer_name,
-        shipping_address: typeof order.shipping_address_json === "string" ? JSON.parse(order.shipping_address_json) : order.shipping_address_json,
+        shipping_address: sensitive.decryptJson(order.shipping_address_json),
         subtotal: Number(order.subtotal_cents), shipping_amount: Number(order.shipping_cents),
         discount_amount: Number(order.discount_cents), payment_fee_amount: Number(order.payment_fee_cents), total: Number(order.total_cents), currency: "BRL",
       }, items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })), tracking };
@@ -902,7 +952,13 @@ export function createGalaticMySqlStore(databaseUrl) {
         `SELECT id,label,recipient_name,federal_tax_id,postal_code,street,number,complement,district,city,state,is_default
          FROM galatic_customer_addresses WHERE customer_id=? ORDER BY is_default DESC,created_at DESC`, [customerId],
       );
-      return rows.map((row) => ({ ...row, is_default: Boolean(row.is_default) }));
+      return rows.map((row) => ({ ...row,
+        federal_tax_id: sensitive.decrypt(row.federal_tax_id),
+        postal_code: sensitive.decrypt(row.postal_code), street: sensitive.decrypt(row.street),
+        number: sensitive.decrypt(row.number), complement: sensitive.decrypt(row.complement),
+        district: sensitive.decrypt(row.district), city: sensitive.decrypt(row.city),
+        is_default: Boolean(row.is_default),
+      }));
     },
     async createCustomerAddress(customerId, address) {
       await ensureSchema();
@@ -915,8 +971,11 @@ export function createGalaticMySqlStore(databaseUrl) {
           `INSERT INTO galatic_customer_addresses
            (id,customer_id,label,recipient_name,federal_tax_id,postal_code,street,number,complement,district,city,state,is_default)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [id, customerId, address.label, address.recipientName, address.federalTaxId || null, address.postalCode,
-            address.street, address.number, address.complement || null, address.district, address.city, address.state, address.isDefault ? 1 : 0],
+          [id, customerId, address.label, address.recipientName,
+            address.federalTaxId ? sensitive.encrypt(address.federalTaxId) : null,
+            sensitive.encrypt(address.postalCode), sensitive.encrypt(address.street), sensitive.encrypt(address.number),
+            address.complement ? sensitive.encrypt(address.complement) : null,
+            sensitive.encrypt(address.district), sensitive.encrypt(address.city), address.state, address.isDefault ? 1 : 0],
         );
         await connection.commit();
       } catch (error) { await connection.rollback(); throw error; }
@@ -1227,7 +1286,10 @@ export function createGalaticMySqlStore(databaseUrl) {
         `SELECT i.sku,i.title,i.quantity,i.unit_amount_cents,p.weight_grams,p.length_cm,p.width_cm,p.height_cm
            FROM galatic_order_items i JOIN galatic_products p ON p.sku=i.sku WHERE i.order_id=? ORDER BY i.id`, [orderId],
       );
-      return { ...order, shipping_address: typeof order.shipping_address_json === "string" ? JSON.parse(order.shipping_address_json) : order.shipping_address_json,
+      return { ...order,
+        buyer_phone: sensitive.decrypt(order.buyer_phone),
+        buyer_document: sensitive.decrypt(order.buyer_document),
+        shipping_address: sensitive.decryptJson(order.shipping_address_json),
         items: items.map((item) => ({ ...item, quantity: Number(item.quantity), unit_amount_cents: Number(item.unit_amount_cents),
           weight_grams: Number(item.weight_grams), length_cm: Number(item.length_cm), width_cm: Number(item.width_cm), height_cm: Number(item.height_cm) })) };
     },
@@ -1298,7 +1360,8 @@ export function createGalaticMySqlStore(databaseUrl) {
           COUNT(o.id) orders_count,COALESCE(SUM(CASE WHEN o.payment_status='paid' THEN o.total_cents ELSE 0 END),0) total_spent,c.created_at
          FROM galatic_customers c LEFT JOIN galatic_orders o ON o.customer_id=c.id GROUP BY c.id ORDER BY c.created_at DESC`,
       );
-      return rows.map((row) => ({ ...row, orders_count: Number(row.orders_count), total_spent: Number(row.total_spent) }));
+      return rows.map((row) => ({ ...row, phone: sensitive.decrypt(row.phone),
+        orders_count: Number(row.orders_count), total_spent: Number(row.total_spent) }));
     },
     async adminCustomer(customerId) {
       await ensureSchema();
@@ -1308,7 +1371,8 @@ export function createGalaticMySqlStore(databaseUrl) {
       );
       if (!customer) return null;
       const [orders] = await pool.query("SELECT id order_number,payment_status,total_cents total,created_at FROM galatic_orders WHERE customer_id=? ORDER BY created_at DESC", [customerId]);
-      return { customer, orders: orders.map((row) => ({ ...row, total: Number(row.total) })) };
+      return { customer: { ...customer, phone: sensitive.decrypt(customer.phone) },
+        orders: orders.map((row) => ({ ...row, total: Number(row.total) })) };
     },
     async adminUpdateCustomerStatus(customerId, status) {
       await ensureSchema();

@@ -53,11 +53,31 @@ test("registers, authenticates and protects a Galatic customer with an opaque Be
   });
   assert.equal(registration.status, 201); const created = await registration.json();
   assert.equal(created.customer.email, "victor@example.com"); assert.match(created.access_token, /^[A-Za-z0-9_-]{40,}$/);
-  assert.equal(registration.headers.get("set-cookie"), null);
+  const cookie = registration.headers.get("set-cookie");
+  assert.match(cookie, /^__Host-galatic_session=/);
+  assert.match(cookie, /HttpOnly/); assert.match(cookie, /Secure/);
+  assert.match(cookie, /SameSite=None/); assert.match(cookie, /Partitioned/);
   const me = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/me`, { headers: { authorization: `Bearer ${created.access_token}`, origin: "https://galatic.com.br" } });
   assert.equal(me.status, 200); assert.equal((await me.json()).customer.name, "Victor Cronemberger");
+  const cookieMe = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/me`, {
+    headers: { cookie: cookie.split(";", 1)[0], origin: "https://galatic.com.br" },
+  });
+  assert.equal(cookieMe.status, 200); assert.equal((await cookieMe.json()).customer.email, "victor@example.com");
   const anonymous = await fetch(`http://127.0.0.1:${port}/v1/galatic/account/orders`);
   assert.equal(anonymous.status, 401);
+});
+
+test("rejects unexpected account fields and unsupported upload bodies", async (context) => {
+  const port = await start(context, customerStore());
+  const unexpected = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/register`, { method: "POST",
+    headers: { "content-type": "application/json", origin: "https://galatic.com.br" },
+    body: JSON.stringify({ first_name: "Victor", last_name: "Teste", email: "v@example.com",
+      password: "SenhaSegura123", role: "owner" }) });
+  assert.equal(unexpected.status, 400); assert.equal((await unexpected.json()).error, "unexpected_fields");
+  const upload = await fetch(`http://127.0.0.1:${port}/v1/galatic/contact`, { method: "POST",
+    headers: { "content-type": "multipart/form-data; boundary=test", origin: "https://galatic.com.br" },
+    body: "--test\r\nContent-Disposition: form-data; name=file\r\n\r\nvalue\r\n--test--" });
+  assert.equal(upload.status, 415); assert.equal((await upload.json()).error, "unsupported_media_type");
 });
 
 test("allows PATCH and DELETE in the Galatic CORS contract without accepting another site", async (context) => {

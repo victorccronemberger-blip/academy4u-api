@@ -119,6 +119,9 @@ export function getEnvironment(source = process.env) {
     galaticCardReservationMinutes: parsePositiveInteger(source.GALATIC_CARD_RESERVATION_MINUTES, 4320, "GALATIC_CARD_RESERVATION_MINUTES"),
     galaticAdminEmail: source.GALATIC_ADMIN_EMAIL?.trim().toLowerCase() || null,
     galaticAdminPassword: source.GALATIC_ADMIN_PASSWORD || null,
+    galaticDataEncryptionKey: source.GALATIC_DATA_ENCRYPTION_KEY?.trim() || null,
+    galaticBotProtectionEnabled: parseBoolean(source.GALATIC_BOT_PROTECTION_ENABLED
+      ?? (String(source.NODE_ENV).trim().toLowerCase() === "production" ? "true" : "false")),
     asaasEnvironment,
     asaasRequested,
     asaasProductionApiKey,

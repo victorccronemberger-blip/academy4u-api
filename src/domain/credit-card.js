@@ -17,8 +17,12 @@ function text(value, minimum, maximum, label) {
 }
 
 export function parseCreditCard(input) {
-  if (!input || typeof input !== "object") {
+  if (!input || Array.isArray(input) || typeof input !== "object") {
     throw new CreditCardInputError("Informe os dados do cartão.");
+  }
+  const allowed = new Set(["holderName", "number", "expiryMonth", "expiryYear", "ccv"]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw new CreditCardInputError("Os dados do cartão contêm campos não permitidos.", "unexpected_fields");
   }
   const number = digits(input.number);
   const expiryMonth = digits(input.expiryMonth);

@@ -7,6 +7,8 @@ import { createCatalogSnapshot, getCheckoutProduct, replaceCatalogProducts } fro
 import { requestContext } from "./http/request-context.js";
 import { jsonErrorHandler } from "./http/error-handler.js";
 import { createFixedWindowLimiter } from "./http/fixed-window-limiter.js";
+import { enforceHttps, privateResponseHeaders, rejectUnsupportedBodies } from "./http/request-security.js";
+import { createBotChallenge } from "./http/bot-challenge.js";
 import { createAsaasClient } from "./integrations/asaas/client.js";
 import { createArtClient } from "./integrations/art/client.js";
 import { createGalaticNotifications } from "./integrations/email/galatic-notifications.js";
@@ -157,6 +159,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   const asaasClient = dependencies.asaasClient ?? createAsaasClient(environment);
   const enviaClient = dependencies.enviaClient ?? createEnviaClient(environment);
   const galaticNotifications = dependencies.galaticNotifications ?? createGalaticNotifications(source);
+  const botChallenge = dependencies.botChallenge ?? createBotChallenge({ enabled: environment.galaticBotProtectionEnabled });
   const contexts = new Map();
 
   for (const tenant of tenants) {
@@ -180,7 +183,9 @@ export function createApp(overrides = {}, dependencies = {}) {
       ?? (tenant.isDefault ? dependencies.store : null);
     const store = injectedStore
       ?? (tenant.mysqlUrl
-        ? (tenant.id === "galatic" ? createGalaticMySqlStore(tenant.mysqlUrl) : createMySqlStore(tenant.mysqlUrl))
+        ? (tenant.id === "galatic" ? createGalaticMySqlStore(tenant.mysqlUrl, {
+          dataEncryptionKey: environment.galaticDataEncryptionKey,
+        }) : createMySqlStore(tenant.mysqlUrl))
         : createInMemoryStore());
     const installmentService = dependencies.installmentServices?.[tenant.id]
       ?? (tenant.isDefault ? dependencies.installmentService : null)
@@ -314,7 +319,13 @@ export function createApp(overrides = {}, dependencies = {}) {
   const allowedOrigins = new Set(tenants.map((tenant) => tenant.publicOrigin));
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
-  app.use(helmet());
+  app.use(enforceHttps(environment.nodeEnvironment));
+  app.use(helmet({
+    contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"], baseUri: ["'none'"] } },
+    crossOriginResourcePolicy: false,
+    referrerPolicy: { policy: "no-referrer" },
+  }));
+  app.use(privateResponseHeaders);
   app.use(requestContext);
   app.use(cors({
     origin(received, callback) {
@@ -322,45 +333,19 @@ export function createApp(overrides = {}, dependencies = {}) {
       return callback(null, false);
     },
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Accept", "Authorization", "Idempotency-Key", "asaas-access-token", "x-academy-trusted-token"],
+    allowedHeaders: ["Content-Type", "Accept", "Authorization", "Idempotency-Key", "X-Galatic-Bot-Proof", "asaas-access-token", "x-academy-trusted-token"],
     credentials: true,
     maxAge: 86_400,
   }));
+  app.use(rejectUnsupportedBodies);
   app.use(express.json({ limit: "32kb", verify(request, _response, buffer) { request.rawBody = buffer.toString("utf8"); } }));
 
   app.get("/health", async (_request, response) => {
     await Promise.all([...contexts.values()].map((context) => context.waitForReady()));
-    if (contexts.size === 1) {
-      const available = defaultContext.readiness.status === "ready";
-      return response.status(available ? 200 : 503).json({
-        status: available ? "ok" : defaultContext.readiness.status,
-        service: "academy-api",
-        database: {
-          status: defaultContext.readiness.status,
-          error: defaultContext.readiness.error,
-        },
-        capabilities: {
-          checkout: available && environment.checkoutEnabled,
-        },
-      });
-    }
-    const platforms = Object.fromEntries([...contexts].map(([id, context]) => [id, {
-      database: context.readiness.status,
-      checkout: context.readiness.status === "ready" && environment.checkoutEnabled,
-      ...(id === "galatic" ? {
-        transactionalEmail: Boolean(galaticNotifications?.ready),
-        paymentMaintenance: Boolean(context.environment.galaticPaymentMaintenanceEnabled),
-        shipping: Boolean(context.environment.galaticEnviaApiKey && context.environment.galaticShippingOrigin),
-        shippingProvider: context.environment.galaticEnviaApiKey ? "envia" : null,
-        shippingOrigin: Boolean(context.environment.galaticShippingOrigin),
-      } : {}),
-    }]));
-    const available = Object.values(platforms).every((platform) => platform.database === "ready");
+    const available = [...contexts.values()].every((context) => context.readiness.status === "ready");
     response.status(available ? 200 : 503).json({
-      status: available ? "ok" : "error",
-      service: "payments-api",
-      environment: environment.asaasEnvironment,
-      platforms,
+      status: available ? "ok" : "unavailable",
+      service: contexts.size === 1 ? "academy-api" : "payments-api",
     });
   });
 
@@ -374,6 +359,7 @@ export function createApp(overrides = {}, dependencies = {}) {
         asaasClient,
         store: context.store,
         notifications: galaticNotifications,
+        botChallenge,
       }));
       app.use("/v1/galatic/admin", ...middleware, createGalaticAdminRouter(express, {
         environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment, asaasClient,
@@ -388,10 +374,12 @@ export function createApp(overrides = {}, dependencies = {}) {
       app.use("/v1/galatic", ...middleware, createGalaticCustomerRouter(express, {
         store: context.store,
         notifications: galaticNotifications,
+        botChallenge,
       }));
       app.use("/v1/galatic", ...middleware, createGalaticPublicRouter(express, {
         store: context.store,
         notifications: galaticNotifications,
+        botChallenge,
       }));
       app.use(`/health/${context.tenant.id}`, createHealthRouter(
         express,

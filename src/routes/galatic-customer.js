@@ -1,14 +1,11 @@
 import { hashPassword, normalizeEmail, opaqueToken, tokenHash, validatePassword, verifyPassword } from "../domain/password.js";
 import { normalizeBrazilianTaxId } from "../domain/brazilian-tax-id.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
+import { allowBodyFields } from "../http/request-security.js";
+import { CUSTOMER_SESSION_COOKIE, clearSessionCookie, sessionCredential, setSessionCookie } from "../http/session-cookie.js";
 
 const text = (value, maximum = 180) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maximum);
 const digits = (value) => String(value ?? "").replace(/\D/g, "");
-
-function bearer(request) {
-  const match = String(request.get("authorization") ?? "").match(/^Bearer\s+([A-Za-z0-9_-]{32,})$/i);
-  return match?.[1] ?? null;
-}
 
 function expiresIn(milliseconds) {
   return new Date(Date.now() + milliseconds).toISOString().slice(0, 23).replace("T", " ");
@@ -32,21 +29,31 @@ async function session(store, customerId) {
   return token;
 }
 
-export function createGalaticCustomerRouter(express, { store, notifications = null }) {
+export function createGalaticCustomerRouter(express, { store, notifications = null, botChallenge = { verify: (_request, _response, next) => next() } }) {
   const router = express.Router();
-  const authLimiter = createFixedWindowLimiter({ limit: 12, windowMs: 60_000, prefix: "galatic-auth" });
+  const authLimiter = createFixedWindowLimiter({ limit: 20, windowMs: 60_000, prefix: "galatic-auth-ip" });
+  const credentialLimiter = createFixedWindowLimiter({
+    limit: 6,
+    windowMs: 15 * 60_000,
+    prefix: "galatic-auth-identity",
+    keyGenerator: (request) => `${request.ip}:${tokenHash(String(request.body?.email ?? "").trim().toLowerCase())}`,
+  });
+  const dummyPasswordHash = hashPassword("GalaticDummyPassword2026");
 
   async function authenticate(request, response, next) {
-    const token = bearer(request);
-    const authenticated = token ? await store.customerForSession(tokenHash(token)) : null;
+    const credential = sessionCredential(request, CUSTOMER_SESSION_COOKIE);
+    const authenticated = credential ? await store.customerForSession(tokenHash(credential.token)) : null;
     if (!authenticated) return response.status(401).json({ error: "unauthorized", message: "Entre na sua conta para continuar." });
     request.galaticCustomer = authenticated.customer;
     request.galaticSessionId = authenticated.sessionId;
-    request.galaticSessionTokenHash = tokenHash(token);
+    request.galaticSessionTokenHash = tokenHash(credential.token);
+    request.galaticSessionTransport = credential.transport;
     return next();
   }
 
-  router.post("/auth/register", authLimiter, async (request, response) => {
+  router.post("/auth/register", authLimiter, credentialLimiter, botChallenge.verify,
+    allowBodyFields(["name", "first_name", "last_name", "email", "phone", "password", "marketing_consent", "website"]),
+    async (request, response) => {
     try {
       const { firstName, lastName } = parseName(request.body);
       const email = normalizeEmail(request.body?.email);
@@ -60,6 +67,7 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
         console.error("Could not send Galatic verification email", { type: error?.name, code: error?.code });
       });
       const accessToken = await session(store, customer.id);
+      setSessionCookie(response, CUSTOMER_SESSION_COOKIE, accessToken, 30 * 86400);
       return response.status(201).json({ customer, access_token: accessToken, token_type: "Bearer", expires_in: 30 * 86400,
         message: "Conta criada. Confira seu e-mail para confirmar o cadastro." });
     } catch (error) {
@@ -70,25 +78,29 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
     }
   });
 
-  router.post("/auth/login", authLimiter, async (request, response) => {
+  router.post("/auth/login", authLimiter, credentialLimiter, botChallenge.verify, allowBodyFields(["email", "password", "website"]), async (request, response) => {
+    if (request.body?.website) return response.status(401).json({ error: "invalid_credentials", message: "E-mail ou senha incorretos." });
     let email;
     try { email = normalizeEmail(request.body?.email); }
     catch { return response.status(401).json({ error: "invalid_credentials", message: "E-mail ou senha incorretos." }); }
     const customer = await store.getCustomerByEmail(email, { includePassword: true });
-    if (!customer || !(await verifyPassword(request.body?.password, customer.password_hash))) {
+    const validPassword = await verifyPassword(request.body?.password, customer?.password_hash ?? await dummyPasswordHash);
+    if (!customer || !validPassword || customer.status === "blocked" || customer.status === "deleted") {
       return response.status(401).json({ error: "invalid_credentials", message: "E-mail ou senha incorretos." });
     }
     delete customer.password_hash;
     const accessToken = await session(store, customer.id);
+    setSessionCookie(response, CUSTOMER_SESSION_COOKIE, accessToken, 30 * 86400);
     return response.json({ customer, access_token: accessToken, token_type: "Bearer", expires_in: 30 * 86400 });
   });
 
   router.get("/auth/me", authenticate, (request, response) => response.json({ customer: request.galaticCustomer }));
   router.post("/auth/logout", authenticate, async (request, response) => {
     await store.revokeCustomerSession(request.galaticSessionTokenHash);
+    clearSessionCookie(response, CUSTOMER_SESSION_COOKIE);
     return response.json({ logged_out: true });
   });
-  router.post("/auth/verify-email", authLimiter, async (request, response) => {
+  router.post("/auth/verify-email", authLimiter, allowBodyFields(["token"]), async (request, response) => {
     const customerId = await store.consumeCustomerToken(tokenHash(request.body?.token), "verify_email");
     if (!customerId) return response.status(400).json({ error: "invalid_token", message: "O link expirou ou já foi utilizado." });
     const customer = await store.getCustomerById(customerId);
@@ -97,7 +109,8 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
     });
     return response.json({ message: "E-mail confirmado com sucesso." });
   });
-  router.post("/auth/forgot-password", authLimiter, async (request, response) => {
+  router.post("/auth/forgot-password", authLimiter, credentialLimiter, botChallenge.verify, allowBodyFields(["email", "website"]), async (request, response) => {
+    if (request.body?.website) return response.json({ message: "Se a conta existir, enviaremos as instruções para redefinir a senha." });
     try {
       const email = normalizeEmail(request.body?.email);
       const customer = await store.getCustomerByEmail(email);
@@ -109,7 +122,7 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
     } catch {}
     return response.json({ message: "Se a conta existir, enviaremos as instruções para redefinir a senha." });
   });
-  router.post("/auth/reset-password", authLimiter, async (request, response) => {
+  router.post("/auth/reset-password", authLimiter, allowBodyFields(["token", "password"]), async (request, response) => {
     try { validatePassword(request.body?.password); }
     catch (error) { return response.status(400).json({ error: error.code, message: error.message }); }
     const customerId = await store.consumeCustomerToken(tokenHash(request.body?.token), "reset_password");
@@ -123,7 +136,7 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
     return response.json({ message: "Senha atualizada. Entre novamente com sua nova senha." });
   });
 
-  router.patch("/account/profile", authenticate, async (request, response) => {
+  router.patch("/account/profile", authenticate, allowBodyFields(["name", "first_name", "last_name", "phone"]), async (request, response) => {
     try {
       const { firstName, lastName } = parseName(request.body);
       const phone = digits(request.body?.phone).slice(0, 13);
@@ -132,7 +145,7 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
       return response.json({ customer });
     } catch (error) { return response.status(400).json({ error: error.code ?? "invalid_profile", message: error.message }); }
   });
-  router.post("/account/change-password", authLimiter, authenticate, async (request, response) => {
+  router.post("/account/change-password", authLimiter, authenticate, allowBodyFields(["current_password", "new_password"]), async (request, response) => {
     const customer = await store.getCustomerById(request.galaticCustomer.id, { includePassword: true });
     if (!(await verifyPassword(request.body?.current_password, customer?.password_hash))) {
       return response.status(400).json({ error: "invalid_current_password", message: "A senha atual está incorreta." });
