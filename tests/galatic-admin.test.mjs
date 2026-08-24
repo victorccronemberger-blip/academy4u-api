@@ -57,6 +57,43 @@ test("protects the existing Galatic admin panel with an HttpOnly cookie session"
   assert.equal(foreignOrigin.status, 403);
 });
 
+test("paginates administrative product and content queries on the server", async (context) => {
+  const calls = [];
+  const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
+    adminSearchProducts: async (options) => {
+      calls.push(["products", options]);
+      return { products: [{ sku: "PAGE-01", name: "Produto paginado" }],
+        pagination: { page: 3, per_page: 25, total: 76, pages: 4 }, facets: { categories: [], b2b: 0 } };
+    },
+    adminContentFiscalPage: async (options) => {
+      calls.push(["content", options]);
+      return { products: [{ sku: "PAGE-02", name: "Conteúdo paginado" }], summary: { total: 76 },
+        pagination: { page: 2, per_page: 50, total: 76, pages: 2 } };
+    },
+  });
+  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
+    GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", GALATIC_DATABASE_URL: "mysql://galatic:test@127.0.0.1/galatic" },
+  { stores: { galatic: store } });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { base, cookie } = await login(server);
+
+  const products = await fetch(`${base}/products?page=3&per_page=25&q=cartas&category=Fam%C3%ADlia&status=active`, {
+    headers: authenticatedHeaders(cookie),
+  });
+  assert.equal(products.status, 200);
+  assert.equal((await products.json()).pagination.total, 76);
+  const content = await fetch(`${base}/content-fiscal?page=2&per_page=50&q=seo&editorial=review&issue=merchant`, {
+    headers: authenticatedHeaders(cookie),
+  });
+  assert.equal(content.status, 200);
+  assert.equal((await content.json()).products[0].sku, "PAGE-02");
+  assert.deepEqual(calls, [
+    ["products", { page: 3, perPage: 25, query: "cartas", category: "Família", status: "active" }],
+    ["content", { page: 2, perPage: 50, query: "seo", editorial: "review", issue: "merchant" }],
+  ]);
+});
+
 test("requires the shared anti-bot proof before an administrative login", async (context) => {
   const store = adminStore(await hashPassword("StrongAdminPassword!42"));
   const botChallenge = {

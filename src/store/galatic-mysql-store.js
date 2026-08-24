@@ -27,6 +27,33 @@ function customerView(row, decrypt = (value) => value) {
   };
 }
 
+function adminProductView(row) {
+  return {
+    ...row,
+    unit_amount: Number(row.unit_amount),
+    cost_amount: row.cost_amount === null ? null : Number(row.cost_amount),
+    active: Number(row.active),
+    manage_stock: Number(row.manage_stock),
+    stock_quantity: row.stock_quantity === null ? null : Number(row.stock_quantity),
+    reserved_quantity: Number(row.reserved_quantity || 0),
+  };
+}
+
+function contentFiscalView(row) {
+  const fiscal = typeof row.fiscal_json === "string" ? JSON.parse(row.fiscal_json || "{}") : (row.fiscal_json || {});
+  const contentReady = String(row.seo_title || "").length >= 20 && String(row.seo_description || "").length >= 70;
+  const logisticsReady = [row.weight_grams, row.length_cm, row.width_cm, row.height_cm].every((value) => Number(value) > 0);
+  const merchantReady = Boolean(row.active && contentReady && row.fiscal_status === "verified" && logisticsReady
+    && (row.merchant_identifier_status === "none" || fiscal.gtin));
+  return { ...row, fiscal_json: undefined, fiscal, content_ready: contentReady, logistics_ready: logisticsReady,
+    merchant_ready: merchantReady, merchant: { ready: merchantReady, identifier_status: row.merchant_identifier_status } };
+}
+
+function pagination(total, page, perPage) {
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  return { page: Math.min(page, pages), per_page: perPage, total, pages };
+}
+
 // This store is intentionally independent from the Academy/LMS schema.  It
 // owns physical-product data only; no runtime query may target courses,
 // settings, users, enrollments or any remote catalogue service.
@@ -1140,8 +1167,35 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           stock_quantity,0 reserved_quantity,weight_grams,length_cm,width_cm,height_cm,editorial_status,updated_at
          FROM galatic_products ORDER BY title`,
       );
-      return rows.map((row) => ({ ...row, unit_amount: Number(row.unit_amount), cost_amount: row.cost_amount === null ? null : Number(row.cost_amount),
-        active: Number(row.active), manage_stock: Number(row.manage_stock), stock_quantity: row.stock_quantity === null ? null : Number(row.stock_quantity), reserved_quantity: 0 }));
+      return rows.map(adminProductView);
+    },
+    async adminSearchProducts({ page = 1, perPage = 25, query = "", category = "", status = "" } = {}) {
+      await ensureSchema();
+      const clauses = [], parameters = [];
+      if (query) {
+        clauses.push("(title LIKE ? OR sku LIKE ? OR brand LIKE ?)");
+        const pattern = `%${query}%`;
+        parameters.push(pattern, pattern, pattern);
+      }
+      if (category) { clauses.push("COALESCE(category_name,'Sem categoria')=?"); parameters.push(category); }
+      if (status === "active") clauses.push("active=1");
+      else if (status === "draft") clauses.push("active=0");
+      const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+      const [[countRow]] = await pool.query(`SELECT COUNT(*) total FROM galatic_products${where}`, parameters);
+      const total = Number(countRow.total || 0), meta = pagination(total, page, perPage), offset = (meta.page - 1) * perPage;
+      const [rows] = await pool.query(
+        `SELECT sku,slug,title name,description,image_url,source_url,category_name category,brand,
+          unit_amount_cents unit_amount,cost_amount_cents cost_amount,currency,active,manage_stock,
+          stock_quantity,0 reserved_quantity,weight_grams,length_cm,width_cm,height_cm,editorial_status,updated_at
+         FROM galatic_products${where} ORDER BY title LIMIT ? OFFSET ?`,
+        [...parameters, perPage, offset],
+      );
+      const [categories] = await pool.query(
+        "SELECT COALESCE(category_name,'Sem categoria') name,COUNT(*) total FROM galatic_products GROUP BY COALESCE(category_name,'Sem categoria') ORDER BY name",
+      );
+      const [[facets]] = await pool.query("SELECT SUM(source_url IS NOT NULL AND source_url<>'') b2b FROM galatic_products");
+      return { products: rows.map(adminProductView), pagination: meta,
+        facets: { categories: categories.map((item) => ({ name: item.name, total: Number(item.total) })), b2b: Number(facets.b2b || 0) } };
     },
     async adminUpsertProduct(product, { create = false } = {}) {
       await ensureSchema();
@@ -1426,20 +1480,53 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           weight_grams,length_cm,width_cm,height_cm,active
          FROM galatic_products ORDER BY title`,
       );
-      const products = rows.map((row) => {
-        const fiscal = typeof row.fiscal_json === "string" ? JSON.parse(row.fiscal_json || "{}") : (row.fiscal_json || {});
-        const contentReady = String(row.seo_title || "").length >= 20 && String(row.seo_description || "").length >= 70;
-        const logisticsReady = [row.weight_grams,row.length_cm,row.width_cm,row.height_cm].every((value) => Number(value) > 0);
-        const merchantReady = Boolean(row.active && contentReady && row.fiscal_status === "verified" && logisticsReady
-          && (row.merchant_identifier_status === "none" || fiscal.gtin));
-        return { ...row, fiscal_json: undefined, fiscal, content_ready: contentReady, logistics_ready: logisticsReady,
-          merchant_ready: merchantReady, merchant: { ready: merchantReady, identifier_status: row.merchant_identifier_status } };
-      });
+      const products = rows.map(contentFiscalView);
       return { products, summary: { total: products.length,
         content_approved: products.filter((row) => row.content_status === "approved" && row.content_ready).length,
         fiscal_verified: products.filter((row) => row.fiscal_status === "verified").length,
         logistics_ready: products.filter((row) => row.logistics_ready).length,
         merchant_ready: products.filter((row) => row.merchant_ready).length } };
+    },
+    async adminContentFiscalPage({ page = 1, perPage = 25, query = "", editorial = "", issue = "" } = {}) {
+      await ensureSchema();
+      const contentReady = "(CHAR_LENGTH(COALESCE(seo_title,''))>=20 AND CHAR_LENGTH(COALESCE(seo_description,''))>=70)";
+      const logisticsReady = "(weight_grams>0 AND length_cm>0 AND width_cm>0 AND height_cm>0)";
+      const merchantReady = `(active=1 AND ${contentReady} AND fiscal_status='verified' AND ${logisticsReady}
+        AND (merchant_identifier_status='none' OR COALESCE(JSON_UNQUOTE(JSON_EXTRACT(fiscal_json,'$.gtin')),'')<>''))`;
+      const clauses = [], parameters = [];
+      if (query) {
+        clauses.push("(title LIKE ? OR sku LIKE ? OR brand LIKE ?)");
+        const pattern = `%${query}%`;
+        parameters.push(pattern, pattern, pattern);
+      }
+      if (["draft", "review", "approved"].includes(editorial)) { clauses.push("editorial_status=?"); parameters.push(editorial); }
+      if (issue === "content") clauses.push(`NOT ${contentReady}`);
+      else if (issue === "fiscal") clauses.push("fiscal_status<>'verified'");
+      else if (issue === "logistics") clauses.push(`NOT ${logisticsReady}`);
+      else if (issue === "merchant") clauses.push(`NOT ${merchantReady}`);
+      const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+      const [[countRow]] = await pool.query(`SELECT COUNT(*) total FROM galatic_products${where}`, parameters);
+      const total = Number(countRow.total || 0), meta = pagination(total, page, perPage), offset = (meta.page - 1) * perPage;
+      const [rows] = await pool.query(
+        `SELECT sku,title name,brand,image_url,editorial_status content_status,seo_title,seo_description,
+          fiscal_status,fiscal_ncm,fiscal_reference_url,merchant_identifier_status,fiscal_json,
+          weight_grams,length_cm,width_cm,height_cm,active
+         FROM galatic_products${where} ORDER BY title LIMIT ? OFFSET ?`,
+        [...parameters, perPage, offset],
+      );
+      const [[summary]] = await pool.query(
+        `SELECT COUNT(*) total,
+          SUM(editorial_status='approved' AND ${contentReady}) content_approved,
+          SUM(fiscal_status='verified') fiscal_verified,
+          SUM(${logisticsReady}) logistics_ready,
+          SUM(${merchantReady}) merchant_ready
+         FROM galatic_products`,
+      );
+      return { products: rows.map(contentFiscalView), pagination: meta, summary: {
+        total: Number(summary.total || 0), content_approved: Number(summary.content_approved || 0),
+        fiscal_verified: Number(summary.fiscal_verified || 0), logistics_ready: Number(summary.logistics_ready || 0),
+        merchant_ready: Number(summary.merchant_ready || 0),
+      } };
     },
     async adminUpdateContentFiscal(sku, values) {
       await ensureSchema();

@@ -14,6 +14,10 @@ const decimal = (value, minimum = 0) => {
   const result = Number(value);
   return Number.isFinite(result) && result >= minimum ? result : null;
 };
+const boundedInteger = (value, fallback, maximum) => {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
+};
 const enabled = (value) => value === true || value === 1 || value === "1" || value === "true" || value === "on";
 const expiresAt = (milliseconds) => new Date(Date.now() + milliseconds).toISOString().slice(0, 23).replace("T", " ");
 const PRODUCT_FIELDS = ["sku", "slug", "name", "title", "unit_amount", "price", "cost_amount", "cost", "description",
@@ -139,7 +143,26 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
 
   router.use(authenticate);
   router.get("/dashboard", async (_request, response) => response.json({ metrics: await store.adminDashboard() }));
-  router.get("/products", async (_request, response) => response.json({ products: await store.adminListProducts() }));
+  router.get("/products", async (request, response) => {
+    const paged = ["page", "per_page", "q", "category", "status"].some((key) => request.query[key] !== undefined);
+    if (!paged) return response.json({ products: await store.adminListProducts() });
+    const options = {
+      page: boundedInteger(request.query.page, 1, 100_000),
+      perPage: boundedInteger(request.query.per_page, 25, 100),
+      query: clean(request.query.q, 120), category: clean(request.query.category, 120),
+      status: ["active", "draft"].includes(clean(request.query.status, 12)) ? clean(request.query.status, 12) : "",
+    };
+    if (store.adminSearchProducts) return response.json(await store.adminSearchProducts(options));
+    const all = await store.adminListProducts();
+    const normalizedQuery = options.query.toLocaleLowerCase("pt-BR");
+    const filtered = all.filter((product) => (!normalizedQuery || [product.name, product.sku, product.brand].join(" ").toLocaleLowerCase("pt-BR").includes(normalizedQuery))
+      && (!options.category || (product.category || "Sem categoria") === options.category)
+      && (!options.status || (options.status === "active" ? product.active == 1 : product.active != 1)));
+    const pages = Math.max(1, Math.ceil(filtered.length / options.perPage)), page = Math.min(options.page, pages);
+    return response.json({ products: filtered.slice((page - 1) * options.perPage, page * options.perPage),
+      pagination: { page, per_page: options.perPage, total: filtered.length, pages },
+      facets: { categories: [], b2b: all.filter((product) => product.source_url).length } });
+  });
   router.post("/products", requireOwner, allowBodyFields(PRODUCT_FIELDS), async (request, response) => {
     try { const product = productInput(request.body); await store.adminUpsertProduct(product, { create: true }); return response.status(201).json({ product }); }
     catch (error) { return response.status(error?.code === "invalid_product" ? 400 : 409).json({ error: error?.code ?? "product_conflict", message: error.message }); }
@@ -301,7 +324,25 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       perCustomer: Number(current.per_customer_limit), active: false });
     return response.json({ updated: true });
   });
-  router.get("/content-fiscal", async (_request, response) => response.json(await store.adminContentFiscal()));
+  router.get("/content-fiscal", async (request, response) => {
+    const paged = ["page", "per_page", "q", "editorial", "issue"].some((key) => request.query[key] !== undefined);
+    if (!paged) return response.json(await store.adminContentFiscal());
+    const options = {
+      page: boundedInteger(request.query.page, 1, 100_000), perPage: boundedInteger(request.query.per_page, 25, 100),
+      query: clean(request.query.q, 120), editorial: clean(request.query.editorial, 24), issue: clean(request.query.issue, 24),
+    };
+    if (store.adminContentFiscalPage) return response.json(await store.adminContentFiscalPage(options));
+    const result = await store.adminContentFiscal(), normalizedQuery = options.query.toLocaleLowerCase("pt-BR");
+    const filtered = result.products.filter((product) => (!normalizedQuery || [product.name, product.sku, product.brand].join(" ").toLocaleLowerCase("pt-BR").includes(normalizedQuery))
+      && (!options.editorial || product.content_status === options.editorial)
+      && (!options.issue || (options.issue === "content" && !product.content_ready)
+        || (options.issue === "fiscal" && product.fiscal_status !== "verified")
+        || (options.issue === "logistics" && !product.logistics_ready)
+        || (options.issue === "merchant" && !product.merchant_ready)));
+    const pages = Math.max(1, Math.ceil(filtered.length / options.perPage)), page = Math.min(options.page, pages);
+    return response.json({ ...result, products: filtered.slice((page - 1) * options.perPage, page * options.perPage),
+      pagination: { page, per_page: options.perPage, total: filtered.length, pages } });
+  });
   router.patch("/content-fiscal/:sku", requireOwner, allowBodyFields(["content_status", "fiscal_status", "merchant_identifier_status",
     "fiscal_ncm", "gtin", "seo_title", "seo_description", "fiscal_reference_url", "cest", "origin", "commercial_unit", "notes"]), async (request, response) => {
     const contentStatus = clean(request.body?.content_status, 24); const fiscalStatus = clean(request.body?.fiscal_status, 24);
