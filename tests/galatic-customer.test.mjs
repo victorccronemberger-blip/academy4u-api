@@ -3,7 +3,7 @@ import test from "node:test";
 import { createApp } from "../src/application.js";
 
 function customerStore() {
-  const state = { customer: null, sessions: new Map(), tokens: new Map(), newsletter: null };
+  const state = { customer: null, sessions: new Map(), sessionExpirations: [], tokens: new Map(), newsletter: null };
   return {
     state, ensureSchema: async () => {}, close: async () => {},
     createCustomer: async (input) => {
@@ -14,7 +14,9 @@ function customerStore() {
     },
     getCustomerByEmail: async (_email, options = {}) => options.includePassword ? { ...state.customer } : (() => { const { password_hash: _, ...view } = state.customer; return view; })(),
     getCustomerById: async (_id, options = {}) => options.includePassword ? { ...state.customer } : (() => { const { password_hash: _, ...view } = state.customer; return view; })(),
-    createCustomerSession: async ({ customerId, tokenHash }) => state.sessions.set(tokenHash, customerId),
+    createCustomerSession: async ({ customerId, tokenHash, expiresAt }) => {
+      state.sessions.set(tokenHash, customerId); state.sessionExpirations.push(new Date(expiresAt).getTime());
+    },
     customerForSession: async (hash) => state.sessions.has(hash) ? { customer: (() => { const { password_hash: _, ...view } = state.customer; return view; })(), sessionId: "session-1" } : null,
     revokeCustomerSession: async (hash) => state.sessions.delete(hash),
     revokeOtherCustomerSessions: async () => {},
@@ -44,21 +46,21 @@ async function start(context, store, dependencies = {}) {
   await new Promise((resolve) => server.once("listening", resolve)); return server.address().port;
 }
 
-test("registers, authenticates and protects a Galatic customer with an opaque Bearer session", async (context) => {
+test("registers, authenticates and protects a Galatic customer with an HttpOnly cookie session", async (context) => {
   const store = customerStore(); const port = await start(context, store);
   const registration = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/register`, { method: "POST",
     headers: { "content-type": "application/json", origin: "https://galatic.com.br" },
     body: JSON.stringify({ first_name: "Victor", last_name: "Cronemberger", email: "Victor@Example.com",
-      phone: "15997671749", password: "SenhaSegura123", marketing_consent: true }),
+      phone: "15997671749", password: "SenhaSegura123", marketing_consent: true,
+      terms_accepted: true, terms_version: "site-2026-08" }),
   });
   assert.equal(registration.status, 201); const created = await registration.json();
-  assert.equal(created.customer.email, "victor@example.com"); assert.match(created.access_token, /^[A-Za-z0-9_-]{40,}$/);
+  assert.equal(created.customer.email, "victor@example.com"); assert.equal(created.access_token, undefined);
   const cookie = registration.headers.get("set-cookie");
   assert.match(cookie, /^__Host-galatic_session=/);
   assert.match(cookie, /HttpOnly/); assert.match(cookie, /Secure/);
   assert.match(cookie, /SameSite=None/); assert.match(cookie, /Partitioned/);
-  const me = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/me`, { headers: { authorization: `Bearer ${created.access_token}`, origin: "https://galatic.com.br" } });
-  assert.equal(me.status, 200); assert.equal((await me.json()).customer.name, "Victor Cronemberger");
+  assert.doesNotMatch(cookie, /Max-Age=/);
   const cookieMe = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/me`, {
     headers: { cookie: cookie.split(";", 1)[0], origin: "https://galatic.com.br" },
   });
@@ -67,8 +69,29 @@ test("registers, authenticates and protects a Galatic customer with an opaque Be
   assert.equal(anonymous.status, 401);
 });
 
+test("persists a customer login only when remember is explicitly enabled", async (context) => {
+  const store = customerStore(); const port = await start(context, store);
+  const headers = { "content-type": "application/json", origin: "https://galatic.com.br" };
+  await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/register`, { method: "POST", headers,
+    body: JSON.stringify({ first_name: "Victor", last_name: "Cronemberger", email: "victor@example.com",
+      phone: "15997671749", password: "SenhaSegura123", marketing_consent: true,
+      terms_accepted: true, terms_version: "site-2026-08" }) });
+  const transient = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/login`, { method: "POST", headers,
+    body: JSON.stringify({ email: "victor@example.com", password: "SenhaSegura123", remember: false }) });
+  assert.equal(transient.status, 200); assert.doesNotMatch(transient.headers.get("set-cookie"), /Max-Age=/);
+  assert.equal((await transient.json()).access_token, undefined);
+  const persistent = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/login`, { method: "POST", headers,
+    body: JSON.stringify({ email: "victor@example.com", password: "SenhaSegura123", remember: true }) });
+  assert.equal(persistent.status, 200); assert.match(persistent.headers.get("set-cookie"), /Max-Age=2592000/);
+});
+
 test("rejects unexpected account fields and unsupported upload bodies", async (context) => {
   const port = await start(context, customerStore());
+  const missingTerms = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/register`, { method: "POST",
+    headers: { "content-type": "application/json", origin: "https://galatic.com.br" },
+    body: JSON.stringify({ first_name: "Victor", last_name: "Teste", email: "v@example.com",
+      password: "SenhaSegura123" }) });
+  assert.equal(missingTerms.status, 400); assert.equal((await missingTerms.json()).error, "terms_required");
   const unexpected = await fetch(`http://127.0.0.1:${port}/v1/galatic/auth/register`, { method: "POST",
     headers: { "content-type": "application/json", origin: "https://galatic.com.br" },
     body: JSON.stringify({ first_name: "Victor", last_name: "Teste", email: "v@example.com",
@@ -100,8 +123,9 @@ test("completes newsletter double opt-in and one-click cancellation", async (con
   const port = await start(context, store, { galaticNotifications: notifications });
   const headers = { "content-type": "application/json", origin: "https://galatic.com.br" };
   const subscription = await fetch(`http://127.0.0.1:${port}/v1/galatic/newsletter/subscribe`, { method: "POST", headers,
-    body: JSON.stringify({ email: "Victor@Example.com", consent: true }) });
+    body: JSON.stringify({ email: "Victor@Example.com", consent: true, consent_version: "site-2026-08" }) });
   assert.equal(subscription.status, 200); assert.equal(messages[0].type, "verify");
+  assert.equal(store.state.newsletter.consentVersion, "site-2026-08");
   assert.match(messages[0].token, /^[a-f0-9]{64}$/);
   const confirmation = await fetch(`http://127.0.0.1:${port}/v1/galatic/newsletter/confirm`, { method: "POST", headers,
     body: JSON.stringify({ token: messages[0].token }) });

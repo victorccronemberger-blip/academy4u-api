@@ -185,6 +185,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       ?? (tenant.mysqlUrl
         ? (tenant.id === "galatic" ? createGalaticMySqlStore(tenant.mysqlUrl, {
           dataEncryptionKey: environment.galaticDataEncryptionKey,
+          requireEncryption: environment.nodeEnvironment === "production",
         }) : createMySqlStore(tenant.mysqlUrl))
         : createInMemoryStore());
     const installmentService = dependencies.installmentServices?.[tenant.id]
@@ -362,12 +363,13 @@ export function createApp(overrides = {}, dependencies = {}) {
         botChallenge,
       }));
       app.use("/v1/galatic/admin", ...middleware, createGalaticAdminRouter(express, {
-        environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment, asaasClient,
+        environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment, asaasClient, botChallenge,
       }));
       const shippingRouter = createGalaticShippingRouter(express, {
         environment: context.environment,
         store: context.store,
         enviaClient,
+        botChallenge,
       });
       app.use("/v1/galatic/quote", ...middleware, shippingRouter);
       app.use("/v1/galatic/shipping", ...middleware, shippingRouter);

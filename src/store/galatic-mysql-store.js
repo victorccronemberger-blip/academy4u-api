@@ -30,8 +30,11 @@ function customerView(row, decrypt = (value) => value) {
 // This store is intentionally independent from the Academy/LMS schema.  It
 // owns physical-product data only; no runtime query may target courses,
 // settings, users, enrollments or any remote catalogue service.
-export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null } = {}) {
+export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null, requireEncryption = false } = {}) {
   const sensitive = createSensitiveDataCipher(dataEncryptionKey);
+  if (requireEncryption && !sensitive.configured) {
+    throw new Error("GALATIC_DATA_ENCRYPTION_KEY is required before Galatic can start in production.");
+  }
   const url = new URL(databaseUrl);
   const pool = mysql.createPool({
     host: url.hostname,
@@ -122,6 +125,7 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null 
           last_name VARCHAR(90) NOT NULL, email VARCHAR(160) NOT NULL UNIQUE,
           phone VARCHAR(20) NULL, password_hash VARCHAR(255) NOT NULL,
           email_verified_at DATETIME(3) NULL, marketing_consent TINYINT(1) NOT NULL DEFAULT 0,
+          terms_accepted_at DATETIME(3) NULL, terms_version VARCHAR(32) NULL,
           newsletter_enabled TINYINT(1) NOT NULL DEFAULT 0,
           newsletter_status VARCHAR(24) NOT NULL DEFAULT 'disabled',
           created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -159,6 +163,7 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null 
         `CREATE TABLE IF NOT EXISTS galatic_newsletter_subscribers (
           email VARCHAR(160) PRIMARY KEY, status VARCHAR(24) NOT NULL DEFAULT 'active',
           customer_id CHAR(36) NULL, consent_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          consent_version VARCHAR(32) NULL,
           action_token_hash CHAR(64) NULL, action_token_expires_at DATETIME(3) NULL,
           updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
         )`,
@@ -250,7 +255,10 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null 
         "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS merchant_identifier_status VARCHAR(24) NOT NULL DEFAULT 'unknown' AFTER fiscal_reference_url",
         "ALTER TABLE galatic_products ADD COLUMN IF NOT EXISTS fiscal_json JSON NULL AFTER merchant_identifier_status",
         "ALTER TABLE galatic_contact_messages ADD COLUMN IF NOT EXISTS admin_notes TEXT NULL AFTER message",
-        "ALTER TABLE galatic_newsletter_subscribers ADD COLUMN IF NOT EXISTS action_token_hash CHAR(64) NULL AFTER consent_at",
+        "ALTER TABLE galatic_customers ADD COLUMN IF NOT EXISTS terms_accepted_at DATETIME(3) NULL AFTER marketing_consent",
+        "ALTER TABLE galatic_customers ADD COLUMN IF NOT EXISTS terms_version VARCHAR(32) NULL AFTER terms_accepted_at",
+        "ALTER TABLE galatic_newsletter_subscribers ADD COLUMN IF NOT EXISTS consent_version VARCHAR(32) NULL AFTER consent_at",
+        "ALTER TABLE galatic_newsletter_subscribers ADD COLUMN IF NOT EXISTS action_token_hash CHAR(64) NULL AFTER consent_version",
         "ALTER TABLE galatic_newsletter_subscribers ADD COLUMN IF NOT EXISTS action_token_expires_at DATETIME(3) NULL AFTER action_token_hash",
         "ALTER TABLE galatic_customers ADD COLUMN IF NOT EXISTS status VARCHAR(24) NOT NULL DEFAULT 'active' AFTER newsletter_status",
       ]) await pool.query(alteration);
@@ -781,21 +789,30 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null 
       } catch (error) { await connection.rollback(); throw error; }
       finally { connection.release(); }
     },
-    async createCustomer({ firstName, lastName, email, phone, passwordHash, marketingConsent }) {
+    async createCustomer({ firstName, lastName, email, phone, passwordHash, marketingConsent, termsVersion }) {
       await ensureSchema();
       const id = randomUUID();
+      const connection = await pool.getConnection();
       try {
-        await pool.query(
+        await connection.beginTransaction();
+        await connection.query(
           `INSERT INTO galatic_customers
-           (id,first_name,last_name,email,phone,password_hash,marketing_consent,newsletter_enabled,newsletter_status)
-           VALUES (?,?,?,?,?,?,?,? ,?)`,
+           (id,first_name,last_name,email,phone,password_hash,marketing_consent,terms_accepted_at,terms_version,newsletter_enabled,newsletter_status)
+           VALUES (?,?,?,?,?,?,?,UTC_TIMESTAMP(3),?,?,?)`,
           [id, firstName, lastName, email, phone ? sensitive.encrypt(phone) : null, passwordHash, marketingConsent ? 1 : 0,
-            marketingConsent ? 1 : 0, marketingConsent ? "active" : "disabled"],
+            termsVersion, marketingConsent ? 1 : 0, marketingConsent ? "active" : "disabled"],
         );
+        if (marketingConsent) await connection.query(
+          `INSERT INTO galatic_newsletter_subscribers (email,status,customer_id,consent_version)
+           VALUES (?,'active',?,?) ON DUPLICATE KEY UPDATE status='active',customer_id=VALUES(customer_id),
+           consent_version=VALUES(consent_version),consent_at=UTC_TIMESTAMP(3)`, [email, id, termsVersion],
+        );
+        await connection.commit();
       } catch (error) {
+        await connection.rollback();
         if (error?.code === "ER_DUP_ENTRY") throw Object.assign(new Error("Já existe uma conta com este e-mail."), { code: "email_exists" });
         throw error;
-      }
+      } finally { connection.release(); }
       return this.getCustomerById(id);
     },
     async getCustomerByEmail(email, { includePassword = false } = {}) {
@@ -997,21 +1014,22 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null 
       await pool.query("UPDATE galatic_customers SET newsletter_enabled=?,newsletter_status=? WHERE id=?", [enabled ? 1 : 0, enabled ? "active" : "disabled", customerId]);
       return this.getCustomerPreferences(customerId);
     },
-    async upsertNewsletter(email, enabled = true, customerId = null) {
+    async upsertNewsletter(email, enabled = true, customerId = null, consentVersion = null) {
       await ensureSchema();
       await pool.query(
-        `INSERT INTO galatic_newsletter_subscribers (email,status,customer_id) VALUES (?,?,?)
-         ON DUPLICATE KEY UPDATE status=VALUES(status),customer_id=COALESCE(VALUES(customer_id),customer_id)`,
-        [email, enabled ? "active" : "unsubscribed", customerId],
+        `INSERT INTO galatic_newsletter_subscribers (email,status,customer_id,consent_version) VALUES (?,?,?,?)
+         ON DUPLICATE KEY UPDATE status=VALUES(status),customer_id=COALESCE(VALUES(customer_id),customer_id),
+         consent_version=COALESCE(VALUES(consent_version),consent_version),consent_at=IF(VALUES(status)='active',UTC_TIMESTAMP(3),consent_at)`,
+        [email, enabled ? "active" : "unsubscribed", customerId, consentVersion],
       );
     },
-    async requestNewsletterSubscription({ email, tokenHash, expiresAt }) {
+    async requestNewsletterSubscription({ email, tokenHash, expiresAt, consentVersion }) {
       await ensureSchema();
       await pool.query(
-        `INSERT INTO galatic_newsletter_subscribers (email,status,action_token_hash,action_token_expires_at)
-         VALUES (?,'pending',?,?) ON DUPLICATE KEY UPDATE status='pending',action_token_hash=VALUES(action_token_hash),
-         action_token_expires_at=VALUES(action_token_expires_at),updated_at=UTC_TIMESTAMP(3)`,
-        [email, tokenHash, expiresAt],
+        `INSERT INTO galatic_newsletter_subscribers (email,status,consent_version,action_token_hash,action_token_expires_at)
+         VALUES (?,'pending',?,?,?) ON DUPLICATE KEY UPDATE status='pending',consent_version=VALUES(consent_version),
+         action_token_hash=VALUES(action_token_hash),action_token_expires_at=VALUES(action_token_expires_at),updated_at=UTC_TIMESTAMP(3)`,
+        [email, consentVersion, tokenHash, expiresAt],
       );
     },
     async confirmNewsletterSubscription(tokenHash, unsubscribeTokenHash) {

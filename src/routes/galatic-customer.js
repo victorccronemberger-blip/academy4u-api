@@ -23,9 +23,9 @@ function parseName(body) {
   return { firstName, lastName };
 }
 
-async function session(store, customerId) {
+async function session(store, customerId, lifetimeSeconds) {
   const token = opaqueToken();
-  await store.createCustomerSession({ customerId, tokenHash: tokenHash(token), expiresAt: expiresIn(30 * 86400000) });
+  await store.createCustomerSession({ customerId, tokenHash: tokenHash(token), expiresAt: expiresIn(lifetimeSeconds * 1000) });
   return token;
 }
 
@@ -52,33 +52,42 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
   }
 
   router.post("/auth/register", authLimiter, credentialLimiter, botChallenge.verify,
-    allowBodyFields(["name", "first_name", "last_name", "email", "phone", "password", "marketing_consent", "website"]),
+    allowBodyFields(["name", "first_name", "last_name", "email", "phone", "password", "marketing_consent", "terms_accepted", "terms_version", "website"]),
     async (request, response) => {
     try {
+      if (request.body?.terms_accepted !== true) {
+        throw Object.assign(new Error("Aceite os termos de uso e a política de privacidade."), { code: "terms_required" });
+      }
+      const termsVersion = text(request.body?.terms_version, 32);
+      if (!/^site-\d{4}-\d{2}$/.test(termsVersion)) {
+        throw Object.assign(new Error("Atualize a página e aceite os termos vigentes."), { code: "invalid_terms_version" });
+      }
       const { firstName, lastName } = parseName(request.body);
       const email = normalizeEmail(request.body?.email);
       const phone = digits(request.body?.phone).slice(0, 13);
       if (phone && phone.length < 10) throw Object.assign(new Error("Informe um celular válido."), { code: "invalid_phone" });
       const passwordHash = await hashPassword(request.body?.password);
-      const customer = await store.createCustomer({ firstName, lastName, email, phone, passwordHash, marketingConsent: request.body?.marketing_consent === true });
+      const customer = await store.createCustomer({ firstName, lastName, email, phone, passwordHash,
+        marketingConsent: request.body?.marketing_consent === true, termsVersion });
       const verification = opaqueToken();
       await store.createCustomerToken({ customerId: customer.id, purpose: "verify_email", tokenHash: tokenHash(verification), expiresAt: expiresIn(24 * 3600000) });
       notifications?.sendEmailVerification?.({ customer, token: verification }).catch((error) => {
         console.error("Could not send Galatic verification email", { type: error?.name, code: error?.code });
       });
-      const accessToken = await session(store, customer.id);
-      setSessionCookie(response, CUSTOMER_SESSION_COOKIE, accessToken, 30 * 86400);
-      return response.status(201).json({ customer, access_token: accessToken, token_type: "Bearer", expires_in: 30 * 86400,
+      const sessionLifetime = 12 * 3600;
+      const accessToken = await session(store, customer.id, sessionLifetime);
+      setSessionCookie(response, CUSTOMER_SESSION_COOKIE, accessToken, null);
+      return response.status(201).json({ customer, expires_in: sessionLifetime,
         message: "Conta criada. Confira seu e-mail para confirmar o cadastro." });
     } catch (error) {
-      if (["email_exists", "invalid_email", "invalid_password", "invalid_name", "invalid_phone"].includes(error?.code)) {
+      if (["email_exists", "invalid_email", "invalid_password", "invalid_name", "invalid_phone", "terms_required", "invalid_terms_version"].includes(error?.code)) {
         return response.status(error.code === "email_exists" ? 409 : 400).json({ error: error.code, message: error.message });
       }
       throw error;
     }
   });
 
-  router.post("/auth/login", authLimiter, credentialLimiter, botChallenge.verify, allowBodyFields(["email", "password", "website"]), async (request, response) => {
+  router.post("/auth/login", authLimiter, credentialLimiter, botChallenge.verify, allowBodyFields(["email", "password", "remember", "website"]), async (request, response) => {
     if (request.body?.website) return response.status(401).json({ error: "invalid_credentials", message: "E-mail ou senha incorretos." });
     let email;
     try { email = normalizeEmail(request.body?.email); }
@@ -89,13 +98,15 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
       return response.status(401).json({ error: "invalid_credentials", message: "E-mail ou senha incorretos." });
     }
     delete customer.password_hash;
-    const accessToken = await session(store, customer.id);
-    setSessionCookie(response, CUSTOMER_SESSION_COOKIE, accessToken, 30 * 86400);
-    return response.json({ customer, access_token: accessToken, token_type: "Bearer", expires_in: 30 * 86400 });
+    const remember = request.body?.remember === true;
+    const sessionLifetime = remember ? 30 * 86400 : 12 * 3600;
+    const accessToken = await session(store, customer.id, sessionLifetime);
+    setSessionCookie(response, CUSTOMER_SESSION_COOKIE, accessToken, remember ? sessionLifetime : null);
+    return response.json({ customer, expires_in: sessionLifetime });
   });
 
   router.get("/auth/me", authenticate, (request, response) => response.json({ customer: request.galaticCustomer }));
-  router.post("/auth/logout", authenticate, async (request, response) => {
+  router.post("/auth/logout", authenticate, allowBodyFields([]), async (request, response) => {
     await store.revokeCustomerSession(request.galaticSessionTokenHash);
     clearSessionCookie(response, CUSTOMER_SESSION_COOKIE);
     return response.json({ logged_out: true });
@@ -165,7 +176,9 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
     return order ? response.json(order) : response.status(404).json({ error: "order_not_found", message: "Pedido não encontrado." });
   });
   router.get("/account/addresses", authenticate, async (request, response) => response.json({ addresses: await store.listCustomerAddresses(request.galaticCustomer.id) }));
-  router.post("/account/addresses", authenticate, async (request, response) => {
+  router.post("/account/addresses", authenticate,
+    allowBodyFields(["label", "recipient_name", "federal_tax_id", "postal_code", "street", "number", "complement", "district", "city", "state", "is_default"]),
+    async (request, response) => {
     try {
       const address = {
         label: text(request.body?.label, 80), recipientName: text(request.body?.recipient_name),
@@ -179,15 +192,19 @@ export function createGalaticCustomerRouter(express, { store, notifications = nu
       return response.status(201).json({ id });
     } catch (error) { return response.status(400).json({ error: "invalid_address", message: error.message }); }
   });
-  router.delete("/account/addresses/:addressId", authenticate, async (request, response) => {
+  router.delete("/account/addresses/:addressId", authenticate, allowBodyFields([]), async (request, response) => {
     const deleted = await store.deleteCustomerAddress(request.galaticCustomer.id, request.params.addressId);
     return deleted ? response.json({ deleted: true }) : response.status(404).json({ error: "address_not_found", message: "Endereço não encontrado." });
   });
   router.get("/account/preferences", authenticate, async (request, response) => response.json({ preferences: await store.getCustomerPreferences(request.galaticCustomer.id) }));
-  router.patch("/account/preferences", authenticate, async (request, response) => {
+  router.patch("/account/preferences", authenticate, allowBodyFields(["newsletter_enabled", "consent_version"]), async (request, response) => {
     const enabled = request.body?.newsletter_enabled === true;
+    const consentVersion = text(request.body?.consent_version, 32);
+    if (enabled && !/^site-\d{4}-\d{2}$/.test(consentVersion)) {
+      return response.status(400).json({ error: "invalid_consent_version", message: "Atualize a página e confirme novamente." });
+    }
     const preferences = await store.setCustomerPreferences(request.galaticCustomer.id, enabled);
-    await store.upsertNewsletter(request.galaticCustomer.email, enabled, request.galaticCustomer.id);
+    await store.upsertNewsletter(request.galaticCustomer.email, enabled, request.galaticCustomer.id, consentVersion || null);
     return response.json({ preferences, message: enabled ? "Newsletter ativa." : "Newsletter desativada." });
   });
 

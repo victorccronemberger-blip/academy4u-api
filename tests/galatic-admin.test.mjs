@@ -24,10 +24,12 @@ async function login(server, password = "StrongAdminPassword!42") {
   const response = await fetch(`${base}/login`, { method: "POST",
     headers: { origin: "https://galatic.com.br", "content-type": "application/json" },
     body: JSON.stringify({ email: "admin@galatic.com.br", password }) });
-  return { base, credentials: await response.json() };
+  return { base, credentials: await response.json(), cookie: response.headers.get("set-cookie")?.split(";", 1)[0] };
 }
 
-test("protects the existing Galatic admin panel with an opaque API session", async (context) => {
+const authenticatedHeaders = (cookie, origin = "https://galatic.com.br", additions = {}) => ({ origin, cookie, ...additions });
+
+test("protects the existing Galatic admin panel with an HttpOnly cookie session", async (context) => {
   const store = adminStore(await hashPassword("StrongAdminPassword!42"));
   const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
     GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", GALATIC_DATABASE_URL: "mysql://galatic:test@127.0.0.1/galatic" },
@@ -42,15 +44,39 @@ test("protects the existing Galatic admin panel with an opaque API session", asy
     body: JSON.stringify({ email: "admin@galatic.com.br", password: "StrongAdminPassword!42" }) });
   assert.equal(login.status, 200);
   const credentials = await login.json();
-  assert.match(credentials.access_token, /^[A-Za-z0-9_-]{32,}$/);
+  assert.equal(credentials.access_token, undefined);
   assert.equal(credentials.admin.role, "owner");
+  const cookie = login.headers.get("set-cookie")?.split(";", 1)[0];
+  assert.match(cookie, /^__Host-galatic_admin_session=/);
 
-  const dashboard = await fetch(`${base}/dashboard`, { headers: { origin: "https://galatic.com.br", authorization: `Bearer ${credentials.access_token}` } });
+  const dashboard = await fetch(`${base}/dashboard`, { headers: authenticatedHeaders(cookie) });
   assert.equal(dashboard.status, 200);
   assert.deepEqual((await dashboard.json()).metrics, { orders_today: 2, revenue_today: 89998, pending_shipments: 1 });
 
-  const foreignOrigin = await fetch(`${base}/dashboard`, { headers: { origin: "https://academy4u.com.br", authorization: `Bearer ${credentials.access_token}` } });
+  const foreignOrigin = await fetch(`${base}/dashboard`, { headers: authenticatedHeaders(cookie, "https://academy4u.com.br") });
   assert.equal(foreignOrigin.status, 403);
+});
+
+test("requires the shared anti-bot proof before an administrative login", async (context) => {
+  const store = adminStore(await hashPassword("StrongAdminPassword!42"));
+  const botChallenge = {
+    issue: (_request, response) => response.status(204).end(),
+    verify: (request, response, next) => request.get("x-galatic-bot-proof") === "valid-proof"
+      ? next()
+      : response.status(400).json({ error: "bot_challenge_required" }),
+  };
+  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
+    GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: store }, botChallenge });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/v1/galatic/admin/login`;
+  const body = JSON.stringify({ email: "admin@galatic.com.br", password: "StrongAdminPassword!42" });
+  const denied = await fetch(url, { method: "POST", headers: {
+    origin: "https://galatic.com.br", "content-type": "application/json" }, body });
+  assert.equal(denied.status, 400); assert.equal((await denied.json()).error, "bot_challenge_required");
+  const accepted = await fetch(url, { method: "POST", headers: {
+    origin: "https://galatic.com.br", "content-type": "application/json", "x-galatic-bot-proof": "valid-proof" }, body });
+  assert.equal(accepted.status, 200); assert.equal((await accepted.json()).access_token, undefined);
 });
 
 test("does not declare production readiness while Galatic payments are still in sandbox", async (context) => {
@@ -89,7 +115,7 @@ test("does not declare production readiness while Galatic payments are still in 
     await new Promise((resolve) => server.once("listening", resolve));
     const authenticated = await login(server);
     const response = await fetch(`${authenticated.base}/readiness`, {
-      headers: { origin: "https://galatic.com.br", authorization: `Bearer ${authenticated.credentials.access_token}` },
+      headers: authenticatedHeaders(authenticated.cookie),
     });
     assert.equal(response.status, 200);
     return response.json();
@@ -122,9 +148,9 @@ test("cancels an unpaid Asaas charge before releasing the Galatic order", async 
   { stores: { galatic: store }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
   await new Promise((resolve) => server.once("listening", resolve));
-  const { base, credentials } = await login(server);
+  const { base, cookie } = await login(server);
   const result = await fetch(`${base}/orders/order-123/payment/cancel`, { method: "POST",
-    headers: { origin: "https://galatic.com.br", authorization: `Bearer ${credentials.access_token}` } });
+    headers: authenticatedHeaders(cookie) });
   assert.equal(result.status, 200);
   assert.deepEqual(calls, [["get", "pay_pending_123"], ["delete", "pay_pending_123"], ["store", "order-123"]]);
 });
@@ -141,8 +167,8 @@ test("requires the full order number before requesting an Asaas refund", async (
   { stores: { galatic: store }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
   await new Promise((resolve) => server.once("listening", resolve));
-  const { base, credentials } = await login(server);
-  const headers = { origin: "https://galatic.com.br", authorization: `Bearer ${credentials.access_token}`, "content-type": "application/json" };
+  const { base, cookie } = await login(server);
+  const headers = authenticatedHeaders(cookie, "https://galatic.com.br", { "content-type": "application/json" });
   const denied = await fetch(`${base}/orders/order-paid-123/payment/refund`, { method: "POST", headers,
     body: JSON.stringify({ confirmation: "errado" }) });
   assert.equal(denied.status, 400);

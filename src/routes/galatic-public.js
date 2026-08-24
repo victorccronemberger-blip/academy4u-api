@@ -22,14 +22,16 @@ export function createGalaticPublicRouter(express, { store, notifications = null
     response.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
     return response.json({ product });
   });
-  router.post("/newsletter/subscribe", writeLimiter, botChallenge.verify, allowBodyFields(["email", "consent", "website"]), async (request, response) => {
+  router.post("/newsletter/subscribe", writeLimiter, botChallenge.verify, allowBodyFields(["email", "consent", "consent_version", "website"]), async (request, response) => {
     if (request.body?.website) return response.json({ message: "Inscrição recebida." });
     if (!notifications?.ready) return response.status(503).json({ error: "email_unavailable", message: "A confirmação por e-mail está temporariamente indisponível." });
     try {
       const email = normalizeEmail(request.body?.email);
       if (request.body?.consent !== true) throw new Error("Confirme que deseja receber as novidades.");
+      const consentVersion = clean(request.body?.consent_version, 32);
+      if (!/^site-\d{4}-\d{2}$/.test(consentVersion)) throw new Error("Atualize a página e confirme novamente.");
       const token = newsletterToken();
-      await store.requestNewsletterSubscription({ email, tokenHash: tokenHash(token), expiresAt: expiresIn(24 * 3600000) });
+      await store.requestNewsletterSubscription({ email, tokenHash: tokenHash(token), expiresAt: expiresIn(24 * 3600000), consentVersion });
       await notifications.sendNewsletterVerification({ email, token });
       return response.json({ message: "Confira seu e-mail para confirmar a inscrição na Carta da Mesa." });
     } catch (error) { return response.status(400).json({ error: "invalid_newsletter", message: error.message }); }

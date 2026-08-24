@@ -33,16 +33,19 @@ export function sessionCredential(request, cookieName) {
 }
 
 function cookieValue(name, value, maxAgeSeconds) {
-  return [
+  const parts = [
     `${name}=${encodeURIComponent(value)}`,
     "Path=/",
-    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
     "HttpOnly",
     "Secure",
     "SameSite=None",
     "Partitioned",
     "Priority=High",
-  ].join("; ");
+  ];
+  if (Number.isFinite(maxAgeSeconds)) {
+    parts.splice(2, 0, `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`);
+  }
+  return parts.join("; ");
 }
 
 export function setSessionCookie(response, name, token, maxAgeSeconds) {
