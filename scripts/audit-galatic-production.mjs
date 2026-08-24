@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
 
 const apiOrigin = String(process.env.GALATIC_AUDIT_API_ORIGIN || "https://api.academy4u.com.br").replace(/\/$/, "");
 const storefrontOrigin = String(process.env.GALATIC_AUDIT_STOREFRONT_ORIGIN || "https://galatic.com.br").replace(/\/$/, "");
@@ -19,6 +20,22 @@ async function request(path, options = {}) {
   });
   const body = await response.json().catch(() => ({}));
   return { response, body };
+}
+
+async function botProof() {
+  const issuedAt = Date.now();
+  const challenge = await request("/v1/galatic/security/challenge");
+  assert.equal(challenge.response.status, 200, "desafio anti-bot indisponível");
+  assert.match(String(challenge.body.token || ""), /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/, "token anti-bot inválido");
+  assert.equal(challenge.body.algorithm, "sha256", "algoritmo anti-bot inesperado");
+  const difficulty = Number(challenge.body.difficulty);
+  let counter = 0;
+  while (!createHash("sha256").update(`${challenge.body.token}.${counter}`).digest("hex").startsWith("0".repeat(difficulty))) {
+    counter += 1;
+  }
+  const minimumHumanDelay = 700 - (Date.now() - issuedAt);
+  if (minimumHumanDelay > 0) await new Promise((resolve) => setTimeout(resolve, minimumHumanDelay));
+  return `${challenge.body.token}.${counter}`;
 }
 
 const checkout = await request("/v1/galatic/checkout/status");
@@ -59,6 +76,7 @@ assert.equal(shipping.body.tracking, true, "rastreio desabilitado");
 const items = [{ sku, quantity: 1 }];
 const quote = await request("/v1/galatic/quote", {
   method: "POST",
+  headers: { "x-galatic-bot-proof": await botProof() },
   body: JSON.stringify({ items, postalCode }),
 });
 assert.equal(quote.response.status, 200, `cotação de frete falhou: ${JSON.stringify(quote.body)}`);
@@ -87,7 +105,7 @@ const buyer = {
 for (const method of ["boleto", "cash", "pix_installment"]) {
   const forbidden = await request("/v1/galatic/checkout/orders", {
     method: "POST",
-    headers: { "idempotency-key": crypto.randomUUID() },
+    headers: { "idempotency-key": randomUUID(), "x-galatic-bot-proof": await botProof() },
     body: JSON.stringify({ items, buyer, shipping: { quoteId: selectedQuote.quote_id }, payment: { method } }),
   });
   assert.equal(forbidden.response.status, 400, `${method} não foi bloqueado`);
@@ -96,7 +114,7 @@ for (const method of ["boleto", "cash", "pix_installment"]) {
 
 const excessiveInstallments = await request("/v1/galatic/checkout/orders", {
   method: "POST",
-  headers: { "idempotency-key": crypto.randomUUID() },
+  headers: { "idempotency-key": randomUUID(), "x-galatic-bot-proof": await botProof() },
   body: JSON.stringify({ items, buyer, shipping: { quoteId: selectedQuote.quote_id }, payment: { method: "credit_card", installments: 11 } }),
 });
 assert.equal(excessiveInstallments.response.status, 400, "cartão acima de 10x não foi bloqueado");
