@@ -185,7 +185,6 @@ export function createApp(overrides = {}, dependencies = {}) {
       ?? (tenant.mysqlUrl
         ? (tenant.id === "galatic" ? createGalaticMySqlStore(tenant.mysqlUrl, {
           dataEncryptionKey: environment.galaticDataEncryptionKey,
-          requireEncryption: environment.nodeEnvironment === "production",
         }) : createMySqlStore(tenant.mysqlUrl))
         : createInMemoryStore());
     const installmentService = dependencies.installmentServices?.[tenant.id]

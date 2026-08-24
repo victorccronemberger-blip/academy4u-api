@@ -16,7 +16,7 @@ Não existe uma "chave pública do banco" no navegador. Criá-la abriria uma con
 
 - segredos são variáveis protegidas do ambiente de produção;
 - CPF, telefone e endereços da Galatic são cifrados com AES-256-GCM autenticado;
-- a chave `GALATIC_DATA_ENCRYPTION_KEY` deve ter 32 bytes e ficar fora do Git; em produção, a API falha no boot em vez de gravar dados pessoais sem criptografia;
+- a chave `GALATIC_DATA_ENCRYPTION_KEY` deve ter 32 bytes e ficar fora do Git; a prontidão de produção permanece reprovada enquanto ela não estiver configurada;
 - aceites dos termos e da newsletter registram a versão vigente e o instante do consentimento;
 - senhas usam `scrypt` com salt individual;
 - tokens persistidos no banco são armazenados como hashes opacos;
