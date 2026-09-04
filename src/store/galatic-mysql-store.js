@@ -245,6 +245,14 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           INDEX galatic_shipments_status (status,updated_at),
           CONSTRAINT galatic_shipments_order_fk FOREIGN KEY (order_id) REFERENCES galatic_orders(id) ON DELETE CASCADE
         )`,
+        `CREATE TABLE IF NOT EXISTS galatic_shipment_operations (
+          order_id CHAR(36) PRIMARY KEY, operation_id CHAR(36) NOT NULL UNIQUE,
+          status VARCHAR(32) NOT NULL DEFAULT 'in_progress', provider_reference VARCHAR(100) NULL,
+          error_code VARCHAR(100) NULL, started_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          completed_at DATETIME(3) NULL, updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+          INDEX galatic_shipment_operations_status (status,updated_at),
+          CONSTRAINT galatic_shipment_operations_order_fk FOREIGN KEY (order_id) REFERENCES galatic_orders(id) ON DELETE CASCADE
+        )`,
         `CREATE TABLE IF NOT EXISTS galatic_shipping_webhook_events (
           event_id VARCHAR(160) PRIMARY KEY, tracking_code VARCHAR(100) NULL,
           event_type VARCHAR(80) NOT NULL, received_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -255,6 +263,11 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           template_key VARCHAR(48) NOT NULL, message TEXT NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'pending',
           error_message VARCHAR(500) NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
           sent_at DATETIME(3) NULL, INDEX galatic_admin_emails_status_time (status,created_at)
+        )`,
+        `CREATE TABLE IF NOT EXISTS galatic_rate_limits (
+          scope VARCHAR(80) NOT NULL, key_hash CHAR(64) NOT NULL, attempts INT UNSIGNED NOT NULL DEFAULT 0,
+          window_started_at BIGINT UNSIGNED NOT NULL, reset_at BIGINT UNSIGNED NOT NULL,
+          PRIMARY KEY (scope,key_hash), INDEX galatic_rate_limits_reset (reset_at)
         )`,
       ];
       for (const statement of statements) await pool.query(statement);
@@ -689,6 +702,27 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
     async releaseNotification(key) {
       await ensureSchema();
       await pool.query("DELETE FROM galatic_notification_log WHERE notification_key=? AND status='claimed'", [String(key).slice(0, 160)]);
+    },
+    async consumeRateLimit({ scope, keyHash, windowMs, nowMs }) {
+      await ensureSchema();
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [[current]] = await connection.query(
+          "SELECT attempts,reset_at FROM galatic_rate_limits WHERE scope=? AND key_hash=? FOR UPDATE",
+          [String(scope).slice(0, 80), keyHash],
+        );
+        const resetAt = !current || Number(current.reset_at) <= nowMs ? nowMs + windowMs : Number(current.reset_at);
+        const count = !current || Number(current.reset_at) <= nowMs ? 1 : Number(current.attempts) + 1;
+        await connection.query(
+          `INSERT INTO galatic_rate_limits (scope,key_hash,attempts,window_started_at,reset_at) VALUES (?,?,?,?,?)
+           ON DUPLICATE KEY UPDATE attempts=VALUES(attempts),window_started_at=VALUES(window_started_at),reset_at=VALUES(reset_at)`,
+          [String(scope).slice(0, 80), keyHash, count, resetAt - windowMs, resetAt],
+        );
+        await connection.commit();
+        return { count, resetAt };
+      } catch (error) { await connection.rollback(); throw error; }
+      finally { connection.release(); }
     },
     async updateOrderFromWebhook({ provider, providerOrderId, status, eventId }) {
       await ensureSchema();
@@ -1280,8 +1314,13 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
         `SELECT provider,carrier,service,tracking_code,label_url,track_url,status,created_at,updated_at,canceled_at
            FROM galatic_shipments WHERE order_id=? ORDER BY created_at`, [orderId],
       );
+      const [[shippingOperation]] = await pool.query(
+        `SELECT operation_id,status,provider_reference,error_code,started_at,completed_at,updated_at
+           FROM galatic_shipment_operations WHERE order_id=?`, [orderId],
+      );
       return { order: { ...order, total: Number(order.total), shipping_service_name: "Entrega via Envia" },
-        items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })), shipments, tracking };
+        items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })),
+        shipments, shipping_operation: shippingOperation ?? null, tracking };
     },
     async adminPaymentContext(orderId) {
       await ensureSchema();
@@ -1372,6 +1411,34 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
                 provider_cost_cents,currency,status,canceled_at,created_at,updated_at FROM galatic_shipments WHERE order_id=?`, [orderId],
       );
       return row ? { ...row, provider_cost_cents: row.provider_cost_cents === null ? null : Number(row.provider_cost_cents) } : null;
+    },
+    async claimShipmentCreation(orderId, operationId) {
+      await ensureSchema();
+      const [result] = await pool.query(
+        "INSERT IGNORE INTO galatic_shipment_operations (order_id,operation_id,status) VALUES (?,?,'in_progress')",
+        [orderId, operationId],
+      );
+      if (result.affectedRows) return { claimed: true, operationId };
+      const [[row]] = await pool.query("SELECT status FROM galatic_shipment_operations WHERE order_id=?", [orderId]);
+      return { claimed: false, status: row?.status ?? "in_progress" };
+    },
+    async completeShipmentCreation(orderId, operationId, providerReference = null) {
+      await ensureSchema();
+      const [result] = await pool.query(
+        `UPDATE galatic_shipment_operations SET status='completed',provider_reference=?,error_code=NULL,completed_at=NOW(3)
+          WHERE order_id=? AND operation_id=? AND status='in_progress'`,
+        [providerReference, orderId, operationId],
+      );
+      return result.affectedRows > 0;
+    },
+    async markShipmentCreationUncertain(orderId, operationId, errorCode) {
+      await ensureSchema();
+      const [result] = await pool.query(
+        `UPDATE galatic_shipment_operations SET status='needs_reconciliation',error_code=?
+          WHERE order_id=? AND operation_id=? AND status='in_progress'`,
+        [String(errorCode ?? "unknown").slice(0, 100), orderId, operationId],
+      );
+      return result.affectedRows > 0;
     },
     async saveShipment(orderId, shipment) {
       await ensureSchema();

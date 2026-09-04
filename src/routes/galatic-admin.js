@@ -78,11 +78,13 @@ function couponInput(body) {
 export function createGalaticAdminRouter(express, { environment, store, notifications = null, fulfillment = null, asaasClient = null,
   botChallenge = { verify: (_request, _response, next) => next() } }) {
   const router = express.Router();
-  const authLimiter = createFixedWindowLimiter({ limit: 10, windowMs: 60_000, prefix: "galatic-admin-auth-ip" });
+  const consume = store.consumeRateLimit?.bind(store);
+  const authLimiter = createFixedWindowLimiter({ limit: 10, windowMs: 60_000, prefix: "galatic-admin-auth-ip", consume });
   const identityLimiter = createFixedWindowLimiter({
     limit: 5,
     windowMs: 15 * 60_000,
     prefix: "galatic-admin-auth-identity",
+    consume,
     keyGenerator: (request) => `${request.ip}:${tokenHash(String(request.body?.email ?? "").trim().toLowerCase())}`,
   });
   const dummyPasswordHash = hashPassword("GalaticDummyAdminPassword2026");
@@ -278,7 +280,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
     try { const result = await fulfillment.createLabel(request.params.id); return response.status(result.created ? 201 : 200).json(result); }
     catch (error) {
-      const status = error?.code === "order_not_found" ? 404 : ["order_not_paid", "shipping_service_missing"].includes(error?.code) ? 409
+      const status = error?.code === "order_not_found" ? 404 : ["order_not_paid", "shipping_service_missing", "shipping_in_progress", "shipping_needs_reconciliation"].includes(error?.code) ? 409
         : error?.code === "shipping_unavailable" ? 503 : 502;
       return response.status(status).json({ error: error?.code ?? "label_generation_failed", message: "Não foi possível gerar a etiqueta de envio." });
     }

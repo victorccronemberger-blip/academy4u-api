@@ -31,11 +31,13 @@ async function session(store, customerId, lifetimeSeconds) {
 
 export function createGalaticCustomerRouter(express, { store, notifications = null, botChallenge = { verify: (_request, _response, next) => next() } }) {
   const router = express.Router();
-  const authLimiter = createFixedWindowLimiter({ limit: 20, windowMs: 60_000, prefix: "galatic-auth-ip" });
+  const consume = store.consumeRateLimit?.bind(store);
+  const authLimiter = createFixedWindowLimiter({ limit: 20, windowMs: 60_000, prefix: "galatic-auth-ip", consume });
   const credentialLimiter = createFixedWindowLimiter({
     limit: 6,
     windowMs: 15 * 60_000,
     prefix: "galatic-auth-identity",
+    consume,
     keyGenerator: (request) => `${request.ip}:${tokenHash(String(request.body?.email ?? "").trim().toLowerCase())}`,
   });
   const dummyPasswordHash = hashPassword("GalaticDummyPassword2026");

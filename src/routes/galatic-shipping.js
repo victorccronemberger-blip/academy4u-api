@@ -45,7 +45,8 @@ export function destinationAddress(to) {
 
 export function createGalaticShippingRouter(express, { environment, store, enviaClient,
   botChallenge = { verify: (_request, _response, next) => next() } }) {
-  const router = express.Router(); const limiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 20, prefix: "galatic-shipping" });
+  const router = express.Router(); const limiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 20,
+    prefix: "galatic-shipping", consume: store.consumeRateLimit?.bind(store) });
   router.get("/status", (_request, response) => response.json({ enabled: Boolean(enviaClient?.ready && environment.galaticShippingOrigin),
     provider: "envia", environment: environment.galaticEnviaEnvironment, labels: true, tracking: true }));
   router.post("/", limiter, botChallenge.verify, allowBodyFields(["items", "postalCode", "destination"]), async (request, response) => {

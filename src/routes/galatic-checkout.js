@@ -142,8 +142,9 @@ function simulatedCardPricing(baseCents, installments, simulation) {
 export function createGalaticCheckoutRouter(express, { environment, asaasClient, store, notifications = null,
   botChallenge = { verify: (_request, _response, next) => next() } }) {
   const router = express.Router();
-  const writeLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 12, prefix: "galatic-checkout" });
-  const readLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 60, prefix: "galatic-order" });
+  const consume = store.consumeRateLimit?.bind(store);
+  const writeLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 12, prefix: "galatic-checkout", consume });
+  const readLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 60, prefix: "galatic-order", consume });
   let feeCache = null;
   const simulationCache = new Map();
   async function accountFees() {

@@ -51,17 +51,36 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
     const packages = order.items.map((item) => ({ type: "box", content: text(item.title, 80), amount: item.quantity,
       declaredValue: item.unit_amount_cents / 100, weight: item.weight_grams / 1000, weightUnit: "KG", lengthUnit: "CM",
       dimensions: { length: item.length_cm, width: item.width_cm, height: item.height_cm } }));
-    const result = await enviaClient.generateLabel({ origin, destination, packages,
-      shipment: { type: 1, carrier: selected.carrier, service: selected.service },
-      settings: { printFormat: "PDF", printSize: "STOCK_4X6", currency: "BRL", comments: `Galatic ${order.id}` } });
-    const data = Array.isArray(result?.data) ? result.data[0] : result?.data;
-    const trackingCode = text(data?.trackingNumber, 100);
-    if (!trackingCode) throw Object.assign(new Error("envia_invalid_label_response"), { code: "envia_invalid_label_response" });
-    const stored = await store.saveShipment(order.id, { providerShipmentId: text(data?.shipmentId, 100) || null,
-      carrier: text(data?.carrier ?? selected.carrier, 60), service: text(data?.service ?? selected.service, 100), trackingCode,
-      labelUrl: text(data?.label, 1500) || null, trackUrl: text(data?.trackUrl, 1500) || null,
-      costCents: Number.isFinite(Number(data?.totalPrice)) ? Math.round(Number(data.totalPrice) * 100) : null,
-      currency: text(data?.currency, 3).toUpperCase() || "BRL" });
+    const operationId = randomUUID();
+    const claim = await store.claimShipmentCreation(order.id, operationId);
+    if (!claim.claimed) {
+      const code = claim.status === "needs_reconciliation" ? "shipping_needs_reconciliation" : "shipping_in_progress";
+      throw Object.assign(new Error(code), { code });
+    }
+    let stored;
+    let trackingCode;
+    try {
+      const result = await enviaClient.generateLabel({ origin, destination, packages,
+        shipment: { type: 1, carrier: selected.carrier, service: selected.service },
+        settings: { printFormat: "PDF", printSize: "STOCK_4X6", currency: "BRL", comments: `Galatic ${order.id}` } });
+      const data = Array.isArray(result?.data) ? result.data[0] : result?.data;
+      trackingCode = text(data?.trackingNumber, 100);
+      if (!trackingCode) throw Object.assign(new Error("envia_invalid_label_response"), { code: "envia_invalid_label_response" });
+      stored = await store.saveShipment(order.id, { providerShipmentId: text(data?.shipmentId, 100) || null,
+        carrier: text(data?.carrier ?? selected.carrier, 60), service: text(data?.service ?? selected.service, 100), trackingCode,
+        labelUrl: text(data?.label, 1500) || null, trackUrl: text(data?.trackUrl, 1500) || null,
+        costCents: Number.isFinite(Number(data?.totalPrice)) ? Math.round(Number(data.totalPrice) * 100) : null,
+        currency: text(data?.currency, 3).toUpperCase() || "BRL" });
+      await store.completeShipmentCreation(order.id, operationId, stored?.provider_shipment_id ?? null);
+    } catch (error) {
+      // A chamada externa pode ter sido concluída mesmo quando a resposta se perde.
+      // Não libera para retry automático: uma pessoa deve reconciliar com a Envia.
+      await store.markShipmentCreationUncertain(order.id, operationId, error?.code ?? error?.name ?? "unknown").catch(() => {});
+      await store.recordOperationalAlert?.({ type: "shipment_reconciliation_required", source: "galatic-fulfillment",
+        summary: "A emissão de etiqueta precisa ser reconciliada antes de nova tentativa.",
+        context: { orderId: order.id, operationId, code: error?.code ?? error?.name ?? "unknown" } }).catch(() => {});
+      throw error;
+    }
     const notificationKey = `shipping:label_created:${order.id}`;
     await notifyShipping(order.id, notificationKey, "label_created", trackingCode,
       "A etiqueta foi criada e o pedido seguirá para postagem.");
@@ -109,3 +128,4 @@ export function normalizeEnviaStatus(value) {
   if (/cancel/.test(status)) return "shipment_canceled";
   return "label_created";
 }
+import { randomUUID } from "node:crypto";

@@ -8,7 +8,8 @@ const expiresIn = (milliseconds) => new Date(Date.now() + milliseconds).toISOStr
 
 export function createGalaticPublicRouter(express, { store, notifications = null, botChallenge = { issue: (_request, response) => response.status(204).end(), verify: (_request, _response, next) => next() } }) {
   const router = express.Router();
-  const writeLimiter = createFixedWindowLimiter({ limit: 20, windowMs: 60_000, prefix: "galatic-public-write" });
+  const writeLimiter = createFixedWindowLimiter({ limit: 20, windowMs: 60_000, prefix: "galatic-public-write",
+    consume: store.consumeRateLimit?.bind(store) });
 
   router.get("/security/challenge", writeLimiter, botChallenge.issue);
 
