@@ -21,7 +21,7 @@
     "cors": "2.8.6",
     "express": "5.2.1",
     "helmet": "8.3.0",
-    "mysql2": "^3.14.4",
-    "nodemailer": "^9.0.5"
+    "mysql2": "^3.24.4",
+    "nodemailer": "^10.0.3"
   }
 }
