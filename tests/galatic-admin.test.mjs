@@ -29,6 +29,27 @@ async function login(server, password = "StrongAdminPassword!42") {
 
 const authenticatedHeaders = (cookie, origin = "https://galatic.com.br", additions = {}) => ({ origin, cookie, ...additions });
 
+for (const installments of [2, 10]) test(`refunds the full ${installments}x group once and never resends an uncertain refund`, async (context) => {
+  const calls = []; let state = null;
+  const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
+    adminPaymentContext: async () => ({ id: "order-refund-group", providerOrderId: "pay_first", providerGroupId: "ins_full_group", status: "paid" }),
+    claimRefund: async () => state ? { claimed: false, state } : ((state = "in_progress"), { claimed: true, group: true, providerReference: "ins_full_group" }),
+    finishRefundRequest: async (_orderId, next) => { state = next; },
+  });
+  const asaasClient = { refundPayment: async () => assert.fail("a group must not refund only its first payment"),
+    refundInstallment: async (...args) => { calls.push(args); throw Object.assign(new Error("synthetic_timeout"), { code: "asaas_timeout" }); } };
+  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: store }, asaasClient });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { base, cookie } = await login(server);
+  const post = () => fetch(`${base}/orders/order-refund-group/payment/refund`, { method: "POST",
+    headers: authenticatedHeaders(cookie, "https://galatic.com.br", { "content-type": "application/json" }), body: JSON.stringify({ confirmation: "order-refund-group" }) });
+  const first = await post(); assert.equal(first.status, 202);
+  assert.equal((await first.json()).error, "refund_reconciliation_pending");
+  assert.equal((await post()).status, 202);
+  assert.deepEqual(calls, [["ins_full_group"]]); assert.equal(state, "uncertain");
+});
+
 test("protects the existing Galatic admin panel with an HttpOnly cookie session", async (context) => {
   const store = adminStore(await hashPassword("StrongAdminPassword!42"));
   const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
@@ -196,6 +217,8 @@ test("requires the full order number before requesting an Asaas refund", async (
   let refunds = 0;
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
     adminPaymentContext: async () => ({ id: "order-paid-123", providerOrderId: "pay_paid_123", status: "paid" }),
+    claimRefund: async () => ({ claimed: true, providerReference: "pay_paid_123", group: false }),
+    finishRefundRequest: async () => {},
     recordOperationalAlert: async () => {},
   });
   const asaasClient = { refundPayment: async () => { refunds += 1; } };

@@ -1,3 +1,4 @@
+import { createGalaticPaymentRecovery } from "../services/galatic-payment-recovery.js";
 import { hashPassword, normalizeEmail, opaqueToken, tokenHash, verifyPassword } from "../domain/password.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 import { allowBodyFields } from "../http/request-security.js";
@@ -90,6 +91,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   const dummyPasswordHash = hashPassword("GalaticDummyAdminPassword2026");
 
   async function notifyOnce(orderId, key, method, extra = {}) {
+    if (store.enqueueNotification && method === "sendPaymentCanceled") return; // committed with cancellation
+    if (store.enqueueNotification) return store.enqueueNotification(`${key}:${orderId}`, orderId, method, extra);
     if (!notifications?.[method] || !store.getOrderNotification) return;
     const order = await store.getOrderNotification(orderId);
     const notificationKey = `${key}:${orderId}`;
@@ -208,9 +211,23 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   });
 
   router.get("/orders", async (_request, response) => response.json({ orders: await store.adminListOrders() }));
+  router.get("/orders/:id/payment/refund-history", async (request, response) => response.json({ attempts: await store.adminRefundHistory?.(request.params.id) ?? [] }));
+  router.get("/refund-operations", async (_request, response) => response.json({ operations: await store.adminRefundOperations?.() ?? [] }));
+  router.get("/payment-operations", async (_request, response) => response.json({ operations: await store.adminPaymentOperations?.() ?? [] }));
+  router.get("/notification-jobs", async (_request, response) => response.json({ jobs: await store.adminNotificationJobs?.() ?? [] }));
   router.get("/alerts", async (_request, response) => response.json({ alerts: await store.adminListOperationalAlerts() }));
   router.get("/orders/:id", async (request, response) => {
     const result = await store.adminOrder(request.params.id); return result ? response.json(result) : response.status(404).json({ error: "order_not_found" });
+  });
+  router.post("/orders/:id/payment/reconcile", requireOwner, allowBodyFields([]), async (request, response) => {
+    if (!asaasClient || !store.getCheckoutRecovery) return response.status(503).json({ error: "payment_unavailable" });
+    try {
+      const result = await createGalaticPaymentRecovery({ store, asaasClient })({ orderId: request.params.id });
+      if (!result) return response.status(409).json({ error: "payment_reconciliation_not_pending" });
+      await store.recordOperationalAlert?.({ type: "payment_reconciled", source: "galatic-admin", severity: "info",
+        summary: "Tentativa conciliada com o provedor.", context: { orderId: request.params.id, adminId: request.galaticAdmin.id } });
+      return response.json(result.body);
+    } catch (error) { return response.status(409).json({ error: error?.code ?? "payment_reconciliation_pending" }); }
   });
   router.post("/orders/:id/payment/cancel", requireOwner, allowBodyFields([]), async (request, response) => {
     if (!asaasClient) return response.status(503).json({ error: "payment_unavailable" });
@@ -236,7 +253,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       if (canceled) await notifyOnce(order.id, "payment-canceled", "sendPaymentCanceled");
       return response.json({ canceled: Boolean(canceled), order_id: order.id });
     } catch (error) {
-      return response.status(error?.status === 404 && order.status === "canceled" ? 200 : 502).json({
+      return response.status(error?.code === "payment_reconciliation_required" ? 409 : error?.status === 404 && order.status === "canceled" ? 200 : 502).json({
         error: error?.code ?? "payment_cancellation_failed", message: "Não foi possível cancelar a cobrança no Asaas.",
       });
     }
@@ -249,16 +266,26 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       return response.status(400).json({ error: "refund_confirmation_required", message: "Confirme com o número completo do pedido." });
     }
     if (order.status !== "paid") return response.status(409).json({ error: "order_not_paid" });
+    let claim;
+    try { claim = await store.claimRefund(order.id, request.galaticAdmin.id); }
+    catch (error) { return response.status(409).json({ error: error?.code ?? "refund_unavailable" }); }
+    if (!claim.claimed) return response.status(202).json({ requested: claim.state === "requested" || claim.state === "completed",
+      reconciliation_pending: ["in_progress", "uncertain"].includes(claim.state), state: claim.state, order_id: order.id });
     try {
-      await asaasClient.refundPayment(order.providerOrderId);
+      if (claim.group) await asaasClient.refundInstallment(claim.providerReference);
+      else await asaasClient.refundPayment(claim.providerReference);
+      await store.finishRefundRequest(order.id, "requested", null, claim.version);
       await store.recordOperationalAlert?.({ type: "refund_requested", severity: "info", source: "galatic-admin",
-        summary: "Estorno integral solicitado ao Asaas.", context: { orderId: order.id, adminId: request.galaticAdmin.id } });
-      await notifyOnce(order.id, "refund-requested", "sendRefundRequested");
-      return response.status(202).json({ requested: true, order_id: order.id, message: "Estorno solicitado. A confirmação será conciliada pelo webhook do Asaas." });
+        summary: "Estorno integral solicitado ao Asaas.", context: { orderId: order.id, adminId: request.galaticAdmin.id, group: claim.group } });
+      return response.status(202).json({ requested: true, order_id: order.id, message: "Estorno solicitado. A confirmacao sera conciliada pelo webhook do Asaas." });
     } catch (error) {
-      return response.status(502).json({ error: error?.code ?? "refund_failed", message: "O Asaas não aceitou a solicitação de estorno." });
+      const definitive = [400, 422].includes(error?.status);
+      await store.finishRefundRequest(order.id, definitive ? "rejected" : "uncertain", error?.code ?? error?.name, claim.version).catch(() => {});
+      return response.status(definitive ? 400 : 202).json({ error: definitive ? "refund_rejected" : "refund_reconciliation_pending",
+        order_id: order.id, message: definitive ? "O provedor recusou o estorno." : "Estamos confirmando o estorno. Nao repita a operacao." });
     }
   });
+
   router.post("/orders/:id/shipping/manual-dispatch", allowBodyFields(["tracking_code"]), async (request, response) => {
     const tracking = clean(request.body?.tracking_code, 100);
     if (!/^[A-Za-z0-9._\-/]{5,100}$/.test(tracking)) return response.status(400).json({ error: "invalid_tracking" });

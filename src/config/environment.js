@@ -136,6 +136,7 @@ export function getEnvironment(source = process.env) {
     asaasWebhookTokenHash: null,
     asaasAvailable,
     checkoutEnabled: asaasRequested && asaasAvailable,
+    galaticSalesEnabled: source.GALATIC_SALES_ENABLED?.trim().toLowerCase() === "true" || (!source.GALATIC_SALES_ENABLED && source.NODE_ENV?.trim().toLowerCase() !== "production"),
     // Integração ART (matrícula principal). ART_ENABLED=false desliga sem
     // quebrar o fallback LMS. As demais variáveis têm defaults seguros.
     artEnabled: parseBoolean(source.ART_ENABLED ?? "false"),

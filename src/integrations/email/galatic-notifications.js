@@ -71,7 +71,7 @@ async function hostingerRequest(config, path, options = {}) {
   return response.json();
 }
 
-function document(title, preview, body, action = null, family = "community") {
+function renderDocument(title, preview, body, action = null, family = "community", salesEnabled = false) {
   const safeTitle = escapeHtml(title); const safePreview = escapeHtml(preview);
   const visual = emailVisuals[family] || emailVisuals.community;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="color-scheme" content="light"><title>${safeTitle}</title>
@@ -84,7 +84,7 @@ function document(title, preview, body, action = null, family = "community") {
   <tr><td class="email-pad" style="padding:40px 42px 42px;background:#171220"><div style="color:#ff8055;font-size:11px;font-weight:800;letter-spacing:2.2px;text-transform:uppercase">${escapeHtml(visual.eyebrow)}</div><h1 class="email-title" style="font-size:32px;line-height:1.16;margin:14px 0 18px;color:#fff;font-weight:800;letter-spacing:-.5px">${safeTitle}</h1><div style="color:#d8cfdd;font-size:15px;line-height:1.75">${body}</div>
   ${action ? `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:27px"><tr><td bgcolor="#ff6b3d" style="border-radius:12px"><a href="${escapeHtml(action.url)}" style="display:inline-block;background:#ff6b3d;color:#160b08;text-decoration:none;font-size:14px;line-height:18px;font-weight:900;padding:15px 23px;border-radius:12px">${escapeHtml(action.label)} &nbsp;→</a></td></tr></table>` : ""}
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:32px;border-top:1px solid #352a3f"><tr><td style="padding-top:19px;color:#8f8596;font-size:12px;line-height:1.65">Precisa de ajuda? Responda este e-mail ou acesse nossa <a href="https://galatic.com.br/ajuda/" style="color:#ff8055;text-decoration:underline">Central de ajuda</a>.</td></tr></table></td></tr>
-  <tr><td style="padding:25px 32px;background:#f7f0e7;color:#15111d"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td width="58" valign="top"><a href="https://galatic.com.br/" style="text-decoration:none"><img src="https://galatic.com.br/favicon-galatic-20260818-192.png" width="52" height="52" alt="Galatic" style="display:block;width:52px;height:52px;border:0;border-radius:12px"></a></td><td class="footer-copy" valign="top" style="padding-left:17px;color:#5e5664;font-size:11px;line-height:1.65"><strong style="display:block;color:#171220;font-size:13px;margin-bottom:2px">Galatic Boardgame Store</strong>Sua mesa. Sua história.<br>CNPJ 67.956.916/0001-90 · <a href="mailto:comercial@galatic.com.br" style="color:#c54f27">comercial@galatic.com.br</a><br><a href="https://galatic.com.br/politicas/privacidade/" style="color:#5e5664">Privacidade</a> &nbsp;·&nbsp; <a href="https://galatic.com.br/politicas/termos/" style="color:#5e5664">Termos de uso</a></td></tr></table></td></tr>
+  <tr><td style="padding:25px 32px;background:#f7f0e7;color:#15111d"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td width="58" valign="top"><a href="https://galatic.com.br/" style="text-decoration:none"><img src="https://galatic.com.br/favicon-galatic-20260818-192.png" width="52" height="52" alt="Galatic" style="display:block;width:52px;height:52px;border:0;border-radius:12px"></a></td><td class="footer-copy" valign="top" style="padding-left:17px;color:#5e5664;font-size:11px;line-height:1.65"><strong style="display:block;color:#171220;font-size:13px;margin-bottom:2px">Galatic Boardgame Store</strong>Sua mesa. Sua história.<br>galatic.com.br${salesEnabled ? "" : " · Operação em preparação"} · <a href="mailto:comercial@galatic.com.br" style="color:#c54f27">comercial@galatic.com.br</a><br><a href="https://galatic.com.br/politicas/privacidade/" style="color:#5e5664">Privacidade</a> &nbsp;·&nbsp; <a href="https://galatic.com.br/politicas/termos/" style="color:#5e5664">Termos de uso</a></td></tr></table></td></tr>
   <tr><td align="center" style="padding:12px 20px;background:#ff6b3d;color:#25100a;font-size:9px;font-weight:800;letter-spacing:1.7px;text-transform:uppercase">Encontros que viram histórias</td></tr>
   </table></td></tr></table></body></html>`;
 }
@@ -96,6 +96,8 @@ export function createGalaticNotifications(source = process.env) {
   const transporter = smtp ? nodemailer.createTransport({ host: smtp.host, port: smtp.port, secure: smtp.secure,
     auth: smtp.auth, disableFileAccess: true, disableUrlAccess: true }) : null;
   const from = smtp ? `"${smtp.name.replace(/[\r\n"]/g, "")}" <${smtp.from}>` : null;
+  const salesEnabled = String(source.GALATIC_SALES_ENABLED ?? "false").trim().toLowerCase() === "true";
+  const document = (title, preview, body, action = null, family = "community") => renderDocument(title, preview, body, action, family, salesEnabled);
   const origin = source.GALATIC_PUBLIC_ORIGIN?.trim() || "https://galatic.com.br";
   const operationalRecipient = source.GALATIC_ADMIN_EMAIL?.trim() || null;
   const send = hostinger

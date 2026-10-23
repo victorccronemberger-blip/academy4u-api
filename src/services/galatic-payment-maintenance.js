@@ -1,11 +1,16 @@
+import { createGalaticNotificationOutbox } from "./galatic-notification-outbox.js";
+import { createGalaticPaymentRecovery } from "./galatic-payment-recovery.js";
 import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 
 export function createGalaticPaymentMaintenance({ environment, store, asaasClient, notifications = null, clock = () => Date.now() }) {
+  const recoverPayment = store.getCheckoutRecovery ? createGalaticPaymentRecovery({ store, asaasClient }) : null;
+  const processOutbox = createGalaticNotificationOutbox({ store, notifications });
   let running = false;
   let interval = null;
   let initial = null;
 
   async function notifyCanceled(orderId) {
+    if (store.enqueueNotification) return; // committed with cancellation
     if (!notifications?.sendPaymentCanceled || !store.getOrderNotification) return;
     const order = await store.getOrderNotification(orderId);
     const key = `payment-expired:${orderId}`;
@@ -17,6 +22,11 @@ export function createGalaticPaymentMaintenance({ environment, store, asaasClien
 
   async function reconcile(order) {
     if (!order.providerOrderId) {
+      const operation = await store.getCheckoutRecovery?.({ orderId: order.id });
+      if (operation && ["creating", "uncertain", "attached"].includes(operation.state)) {
+        const recovered = await recoverPayment({ orderId: order.id });
+        return recovered?.body?.status ?? "uncertain";
+      }
       await store.adminCancelUnpaidOrder(order.id);
       await notifyCanceled(order.id);
       return "canceled";
@@ -53,10 +63,38 @@ export function createGalaticPaymentMaintenance({ environment, store, asaasClien
   }
 
   async function run() {
-    if (running || !environment.galaticPaymentMaintenanceEnabled || !asaasClient) return { skipped: true };
+    if (running) return { skipped: true };
     running = true;
     const result = { inspected: 0, canceled: 0, paid: 0, failed: 0 };
     try {
+      await processOutbox();
+      if (!environment.galaticPaymentMaintenanceEnabled || !asaasClient) return { ...result, skippedPayments: true };
+      if (recoverPayment && store.claimPaymentReconciliations) {
+        for (const operation of await store.claimPaymentReconciliations()) {
+          try { await recoverPayment({ key: operation.key }); }
+          catch (error) {
+            result.failed += 1;
+            await store.recordPaymentReconciliationError?.(operation.key, error?.code ?? error?.name);
+            await store.recordOperationalAlert?.({ type: "payment_reconciliation_required", source: "galatic-payment-maintenance",
+              summary: "Tentativa financeira exige conciliacao; reserva e chave preservadas.",
+              context: { orderId: operation.orderId, code: error?.code ?? error?.name } });
+          }
+        }
+      }
+      for (const refund of await store.claimRefundReconciliations?.() ?? []) {
+        try {
+          const payments = refund.providerGroupId
+            ? (await asaasClient.listInstallmentPayments(refund.providerGroupId))?.data
+            : [await asaasClient.getPayment(refund.providerOrderId)];
+          if (!Array.isArray(payments) || payments.length !== refund.installments
+            || payments.some((payment) => normalizeAsaasPaymentStatus(payment.status) !== "refunded")) {
+            await store.recordRefundReconciliationError?.(refund.id, "refund_not_yet_confirmed");
+            continue;
+          }
+          await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: refund.providerOrderId,
+            providerGroupId: refund.providerGroupId, status: "refunded" });
+        } catch (error) { await store.recordRefundReconciliationError?.(refund.id, error?.code ?? error?.name); }
+      }
       const now = clock();
       const orders = await store.listExpiredPaymentReservations({
         pixBefore: new Date(now - environment.galaticPixReservationMinutes * 60_000),
@@ -83,7 +121,7 @@ export function createGalaticPaymentMaintenance({ environment, store, asaasClien
   }
 
   function start() {
-    if (interval || !environment.galaticPaymentMaintenanceEnabled || !asaasClient) return;
+    if (interval) return;
     initial = setTimeout(() => run().catch(() => {}), 30_000);
     initial.unref?.();
     interval = setInterval(() => run().catch(() => {}), 5 * 60_000);

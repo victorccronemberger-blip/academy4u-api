@@ -79,7 +79,8 @@ async function serve(context, store, asaasClient) {
   return `http://127.0.0.1:${address.port}`;
 }
 
-test("synchronizes the authoritative Asaas plan and exposes only safe payment links", async () => {
+test("synchronizes the authoritative Asaas plan and exposes only safe payment links", async (context) => {
+  context.mock.timers.enable({ apis: ["Date"], now: new Date("2026-08-15T12:00:00Z") });
   const store = createInMemoryStore();
   const order = await createPlanOrder(store);
   const service = createInstallmentService({

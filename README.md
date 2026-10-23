@@ -1,5 +1,10 @@
 # ACADEMY4U API
 
+Para publicar ou ativar a Galatic, seguir [GALATIC-RELEASE.md](GALATIC-RELEASE.md).
+Novas vendas Galatic em produção exigem `GALATIC_SALES_ENABLED=true` explícito;
+o padrão fechado preserva conta e pós-venda. O probe `npm run galatic:audit-production`
+faz somente leituras e espera a loja fechada até a habilitação comercial.
+
 Backend financeiro da Academy Cyara. Centraliza cobranças Asaas, preços,
 idempotência, webhooks e entrega de matrículas no MySQL compartilhado com o
 LMS. O checkout permanece visualmente em `https://academy4u.com.br`.

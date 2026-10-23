@@ -41,6 +41,7 @@ function createAccessCallbacks(tenant, store, notifications = null, artActivatio
   return {
     async onAccessGranted(orderId) {
       if (tenant.id === "galatic") {
+        if (store.enqueueNotification) return { granted: true, deliveries: 0 };
         if (!notifications) return { granted: true, deliveries: 0 };
         const order = typeof store.getOrderNotification === "function" ? await store.getOrderNotification(orderId) : null;
         const claimed = order && typeof store.claimNotification === "function"
@@ -107,6 +108,7 @@ function createAccessCallbacks(tenant, store, notifications = null, artActivatio
     },
     async onAccessRevoked(orderId, reason) {
       if (tenant.id === "galatic") {
+        if (store.enqueueNotification) return { revoked: true };
         const order = notifications && typeof store.getOrderNotification === "function"
           ? await store.getOrderNotification(orderId) : null;
         const key = `payment-reversed:${reason}:${orderId}`;
@@ -181,12 +183,18 @@ export function createApp(overrides = {}, dependencies = {}) {
     };
     const injectedStore = dependencies.stores?.[tenant.id]
       ?? (tenant.isDefault ? dependencies.store : null);
-    const store = injectedStore
+    let store;
+    try { store = injectedStore
       ?? (tenant.mysqlUrl
         ? (tenant.id === "galatic" ? createGalaticMySqlStore(tenant.mysqlUrl, {
           dataEncryptionKey: environment.galaticDataEncryptionKey,
+          requireEncryption: environment.nodeEnvironment === "production",
         }) : createMySqlStore(tenant.mysqlUrl))
         : createInMemoryStore());
+    } catch (error) {
+      if (tenant.id !== "galatic") throw error;
+      store = { ensureSchema: async () => { throw error; }, close: async () => {} };
+    }
     const installmentService = dependencies.installmentServices?.[tenant.id]
       ?? (tenant.isDefault ? dependencies.installmentService : null)
       ?? createInstallmentService({ asaasClient, store });
@@ -215,7 +223,12 @@ export function createApp(overrides = {}, dependencies = {}) {
       ...callbacks,
     };
     context.dataReady = Promise.resolve()
-      .then(() => store.ensureSchema())
+      .then(() => {
+        if (tenant.id === "galatic" && environment.nodeEnvironment === "production" && !environment.galaticDataEncryptionKey) {
+          throw new Error("GALATIC_DATA_ENCRYPTION_KEY is required before Galatic can start in production.");
+        }
+        return store.ensureSchema();
+      })
       .then(() => tenant.id === "galatic" ? [] : store.listCatalogProducts())
       .then((products) => {
         if (tenant.id !== "galatic" && !products.length && environment.nodeEnvironment === "production") {
@@ -233,6 +246,7 @@ export function createApp(overrides = {}, dependencies = {}) {
         readiness.error = error?.code || error?.name || "database_initialization_failed";
         throw error;
       });
+    context.dataReady.catch(() => {});
     context.webhookHandler = createAsaasWebhookHandler({
       environment: tenantEnvironment,
       store,
@@ -247,7 +261,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   const referenceContexts = new Map(
     [...contexts.values()].map((context) => [context.tenant.referencePrefix, context]),
   );
-  const ready = Promise.resolve()
+  const providerReady = Promise.resolve()
     .then(async () => {
       // A single-tenant deployment keeps compatibility with the existing LMS
       // runtime switch. In multi-tenant mode the provider environment is a
@@ -279,29 +293,38 @@ export function createApp(overrides = {}, dependencies = {}) {
         await asaasClient.verifyCredentials();
       }
     })
-    .then(() => Promise.all([...contexts.values()].map((context) => context.dataReady)))
-    .then((result) => {
-      for (const context of contexts.values()) context.readiness.status = "ready";
-      // Worker de retry ART em background: converte ativações pendentes quando
-      // a senha do aluno no ART reverte para o CPF (padrão da plataforma).
-      const worker = defaultContext.artRetryWorker;
-      if (worker && environment.artEnabled) {
-        worker.start(Number(environment.artRetryIntervalMs) || 5 * 60_000);
-      }
-      return result;
-    })
+
     .catch((error) => {
+      // Provider credentials/environment are global; database readiness is not.
       for (const context of contexts.values()) {
-        if (context.readiness.status !== "error") {
-          context.readiness.status = "error";
-          context.readiness.error = error?.code || error?.name || "provider_initialization_failed";
-        }
+        context.readiness.status = "error";
+        context.readiness.error = error?.code || error?.name || "provider_initialization_failed";
       }
       throw error;
     });
 
   for (const context of contexts.values()) {
-    context.ready = ready;
+    context.ready = Promise.all([providerReady, context.dataReady]).then(() => {
+      context.readiness.status = "ready";
+      if (context === defaultContext && context.artRetryWorker && environment.artEnabled) {
+        context.artRetryWorker.start(Number(environment.artRetryIntervalMs) || 5 * 60_000);
+      }
+      return context.store;
+    }).catch((error) => {
+      context.readiness.status = "error";
+      context.readiness.error = error?.code || error?.name || "initialization_failed";
+      throw error;
+    });
+    context.ready.catch(() => {});
+  }
+  const ready = Promise.allSettled([...contexts.values()].map((context) => context.ready)).then((results) => {
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+    return results.map((result) => result.value);
+  });
+  ready.catch(() => {});
+
+  for (const context of contexts.values()) {
     context.waitForReady = () => {
       if (context.readiness.status === "ready" || context.readiness.status === "error") return Promise.resolve();
       return new Promise((resolve) => {
@@ -310,7 +333,7 @@ export function createApp(overrides = {}, dependencies = {}) {
           clearTimeout(timeout);
           resolve();
         };
-        ready.then(settle, settle);
+        context.ready.then(settle, settle);
       });
     };
   }

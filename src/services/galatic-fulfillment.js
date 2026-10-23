@@ -1,3 +1,4 @@
+import { galaticPostcode, assertShippingAddress } from "../domain/galatic-address.js";
 const digits = (value) => String(value ?? "").replace(/\D/g, "");
 const text = (value, maximum = 180) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maximum);
 
@@ -9,7 +10,7 @@ function providerAddress(value, fallback = {}) {
     street: text(value.street ?? value.logradouro ?? fallback.street), number: text(value.number ?? value.numero ?? fallback.number, 30) || "S/N",
     complement: text(value.complement ?? value.complemento, 120), district: text(value.district ?? value.bairro ?? fallback.district),
     city: text(value.city ?? value.cidade ?? fallback.city), state: text(value.state ?? value.uf ?? fallback.state, 2).toUpperCase(),
-    country: "BR", postalCode: digits(value.postalCode ?? value.postal_code ?? value.cep ?? fallback.postalCode),
+    country: "BR", postalCode: galaticPostcode(value) || galaticPostcode(fallback),
     identificationNumber: digits(value.federal_tax_id ?? value.document ?? fallback.taxId),
   };
 }
@@ -29,6 +30,7 @@ function shipmentView(row) {
 
 export function createGalaticFulfillmentService({ environment, store, enviaClient, notifications = null }) {
   async function notifyShipping(orderId, key, status, trackingCode, description) {
+    if (store.enqueueNotification) return store.enqueueNotification(key, orderId, "sendShippingUpdate", { status, trackingCode, description });
     if (!notifications?.sendShippingUpdate || !store.getOrderNotification) return;
     const notification = await store.getOrderNotification(orderId);
     if (!notification || !(await store.claimNotification?.(key))) return;
@@ -48,9 +50,15 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
     const origin = providerAddress(environment.galaticShippingOrigin, environment.galaticShippingOrigin);
     const destination = providerAddress({ ...order.shipping_address, name: order.buyer_name, email: order.buyer_email,
       phone: order.buyer_phone, document: order.buyer_document });
+    assertShippingAddress(origin);
+    assertShippingAddress(destination);
     const packages = order.items.map((item) => ({ type: "box", content: text(item.title, 80), amount: item.quantity,
       declaredValue: item.unit_amount_cents / 100, weight: item.weight_grams / 1000, weightUnit: "KG", lengthUnit: "CM",
       dimensions: { length: item.length_cm, width: item.width_cm, height: item.height_cm } }));
+    if (!packages.length || packages.some((item) => !Number.isInteger(item.amount) || item.amount < 1
+      || ![item.weight, item.dimensions.length, item.dimensions.width, item.dimensions.height].every((value) => Number(value) > 0))) {
+      throw Object.assign(new Error("invalid_shipping_packages"), { code: "invalid_shipping_packages" });
+    }
     const operationId = randomUUID();
     const claim = await store.claimShipmentCreation(order.id, operationId);
     if (!claim.claimed) {
@@ -97,7 +105,7 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
     const description = text(data?.events?.[0]?.description ?? data?.status, 500);
     const updated = await store.updateShipmentFromEvent({ eventId,
       eventType: "tracking.poll", trackingCode: shipment.tracking_code, status,
-      description });
+      description, occurredAt: data?.events?.[0]?.timestamp ?? null });
     if (updated?.updated) await notifyShipping(orderId, `shipping:${eventId}:${orderId}`, status,
       shipment.tracking_code, description);
     return store.shipmentForOrder(orderId);
@@ -120,12 +128,12 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
 
 export function normalizeEnviaStatus(value) {
   const status = String(value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if (/delivered|entregue/.test(status)) return "delivered";
-  if (/out_for_delivery|saiu_para_entrega/.test(status)) return "out_for_delivery";
-  if (/exception|failed|incidente|problema/.test(status)) return "delivery_exception";
-  if (/return|devol/.test(status)) return "returned";
-  if (/transit|posted|collected|picked|postado|trânsito|transito/.test(status)) return "in_transit";
-  if (/cancel/.test(status)) return "shipment_canceled";
-  return "label_created";
+  const aliases = { delivered: "delivered", entregue: "delivered", out_for_delivery: "out_for_delivery", saiu_para_entrega: "out_for_delivery",
+    exception: "delivery_exception", failed: "delivery_exception", not_delivered: "delivery_exception", delivery_exception: "delivery_exception",
+    returned: "returned", return: "returned", devolvido: "returned", in_transit: "in_transit", transit: "in_transit", posted: "in_transit",
+    collected: "in_transit", picked_up: "in_transit", postado: "in_transit", canceled: "shipment_canceled", cancelled: "shipment_canceled",
+    shipment_canceled: "shipment_canceled", label_created: "label_created" };
+  return aliases[status] ?? "unknown";
 }
+
 import { randomUUID } from "node:crypto";

@@ -19,6 +19,35 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm run build
+
+  mysql-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-synthetic-only
+          MYSQL_ROOT_HOST: "%"
+          MYSQL_DATABASE: galatic_test_readiness
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-synthetic-only"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Exercise Galatic transactions against an isolated MySQL schema
+        env:
+          MYSQL_TEST_URL: mysql://root:ci-synthetic-only@127.0.0.1:3306/galatic_test_readiness
+        run: npm run test:mysql

@@ -1,3 +1,4 @@
+import { galaticPostcode } from "../domain/galatic-address.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 import { allowBodyFields } from "../http/request-security.js";
 
@@ -24,7 +25,7 @@ async function viaCep(postalCode) {
 }
 function destination(input, fallback, origin) {
   if (!input || typeof input !== "object") return fallback;
-  const postalCode = digits(input.postalCode ?? input.postal_code ?? input.cep);
+  const postalCode = galaticPostcode(input) || fallback.postalCode;
   return { postalCode, street: clean(input.street ?? input.logradouro) || fallback.street,
     number: clean(input.number ?? input.numero, 20) || "S/N", complement: clean(input.complement ?? input.complemento),
     district: clean(input.district ?? input.bairro) || fallback.district, city: clean(input.city ?? input.cidade) || fallback.city,
@@ -52,7 +53,7 @@ export function createGalaticShippingRouter(express, { environment, store, envia
   router.post("/", limiter, botChallenge.verify, allowBodyFields(["items", "postalCode", "destination"]), async (request, response) => {
     if (!enviaClient?.ready || !environment.galaticShippingOrigin) return response.status(503).json({ error: "shipping_unavailable", message: "Cotação temporariamente indisponível." });
     try {
-      const requested = cartItems(request.body?.items); const postalCode = digits(request.body?.postalCode ?? request.body?.destination?.postalCode ?? request.body?.destination?.postal_code ?? request.body?.destination?.cep);
+      const requested = cartItems(request.body?.items); const postalCode = galaticPostcode({ postCode: request.body?.postalCode, postalCode: galaticPostcode(request.body?.destination) });
       if (postalCode.length !== 8) throw new ShippingInputError("Informe um CEP válido.");
       const products = await store.getProductsForCheckout(requested); const byKey = new Map();
       for (const product of products) { byKey.set(product.sku, product); byKey.set(product.slug, product); }
@@ -78,9 +79,10 @@ export function createGalaticShippingRouter(express, { environment, store, envia
         amountCents: Math.round(Number(rate.totalPrice) * 100), deliveryDays: Math.max(0, Number(rate.deliveryDate?.dateDifference ?? 0)),
       }; }).filter((rate) => rate.amountCents > 0).sort((a, b) => a.deliveryDays - b.deliveryDays || a.amountCents - b.amountCents).slice(0, 3);
       if (!rates.length) return response.status(503).json({ error: "shipping_unavailable", message: "Nenhuma entrega disponível para este CEP." });
-      const saved = await store.createShippingQuotes({ destinationPostcode: postalCode, items: normalized.map((item) => ({ sku: item.product.sku, quantity: item.quantity })), quotes: rates });
+      const saved = await store.createShippingQuotes({ destinationPostcode: to.postalCode, items: normalized.map((item) => ({ sku: item.product.sku, quantity: item.quantity, logistics: { weight_grams: item.product.weightGrams, length_cm: item.product.lengthCm, width_cm: item.product.widthCm, height_cm: item.product.heightCm } })), quotes: rates });
       response.json({ quotes: saved.map((quote) => ({ quote_id: quote.id, carrier: quote.carrier, service: quote.serviceName, amount: quote.amountCents, currency: "brl", estimated_days: quote.deliveryDays })), address: base, provider: "envia", expires_in: 900 });
     } catch (error) {
+      if (error?.code === "shipping_destination_mismatch") return response.status(422).json({ error: error.code, message: "O destino informado diverge do CEP da cotação." });
       if (error instanceof ShippingInputError) return response.status(error.status).json({ error: error.message });
       console.error("Galatic shipping quote failed", { status: error?.status, type: error?.name });
       response.status(502).json({ error: "Não foi possível calcular o frete agora." });

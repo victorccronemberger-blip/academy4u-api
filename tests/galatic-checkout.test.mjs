@@ -9,6 +9,8 @@ function store() {
     ensureSchema: async () => {}, close: async () => {},
     previewCheckout: async () => ({ subtotalCents: 44999, shippingCents: 2500, discountCents: 0, couponCode: null, totalCents: 47499 }),
     prepareOrder: async (input) => { state.prepared = input; return { kind: "created", order: { id: "52c02ff3-b755-4df5-90ba-20ea8c8bd035", subtotalCents: 44999, shippingCents: 2500, totalCents: 47499, lines: [{ sku: "DEP001", title: "Deep Regrets", quantity: 1, unitAmountCents: 44999 }] } }; },
+    beginPaymentCreation: async (...args) => { state.operation = args; },
+    markPaymentCreationUncertain: async () => {},
     attachPayment: async (...args) => { state.attached = args; },
     completeCheckoutAttempt: async (...args) => { state.completed = args; },
     releaseFailedOrder: async () => assert.fail("order should not be released"),
@@ -57,7 +59,7 @@ test("creates a server-priced Galatic Pix order with a project-scoped reference"
   const asaasClient = {
     findCustomersByDocument: async () => ({ data: [] }),
     createCustomer: async () => ({ id: "cus_galatic_1" }),
-    createPayment: async (payload) => { calls.push(payload); return { id: "pay_galatic_1", status: "PENDING", dueDate: payload.dueDate }; },
+    createPayment: async (payload) => { calls.push(payload); return { ...payload, id: "pay_galatic_1", status: "PENDING", dueDate: payload.dueDate }; },
     updatePayment: async () => ({ id: "pay_galatic_1", status: "PENDING" }),
     getPixQrCode: async () => ({ encodedImage: "aW1hZ2U=", payload: "000201GALATIC", expirationDate: "2026-08-15" }),
   };
@@ -90,7 +92,7 @@ test("creates an embedded Galatic card order in up to 10x and passes through the
       operationValue: 0.49, oneInstallmentPercentage: 2.99,
       upToSixInstallmentsPercentage: 2.99, upToTwelveInstallmentsPercentage: 2.99,
     } } }),
-    createPayment: async (payload) => { calls.push(payload); return { id: "pay_galatic_card", installment: "ins_galatic_card", status: "CONFIRMED" }; },
+    createPayment: async (payload) => { calls.push(payload); return { ...payload, value: payload.totalValue / payload.installmentCount, id: "pay_galatic_card", installment: "ins_galatic_card", status: "CONFIRMED" }; },
   };
   const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
     PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
@@ -118,7 +120,7 @@ test("creates a Galatic card order in 1x without charging the Asaas fee to the c
   const asaasClient = {
     findCustomersByDocument: async () => ({ data: [{ id: "cus_galatic_card_1x" }] }),
     simulatePayment: async () => assert.fail("1x interest-free must not request a customer fee"),
-    createPayment: async (payload) => { calls.push(payload); return { id: "pay_galatic_card_1x", status: "CONFIRMED" }; },
+    createPayment: async (payload) => { calls.push(payload); return { ...payload, id: "pay_galatic_card_1x", status: "CONFIRMED" }; },
   };
   const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
     PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },

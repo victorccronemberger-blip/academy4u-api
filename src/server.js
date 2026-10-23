@@ -34,7 +34,7 @@ server.requestTimeout = 75_000;
 ready
   .then(() => {
     console.log("Payments API persistent stores are ready.");
-    paymentMaintenance?.start();
+
   })
   .catch((error) => {
     console.error("Payments API could not initialize its persistent stores.", {
@@ -45,6 +45,9 @@ ready
       type: error?.name,
     });
   });
+
+// A healthy Galatic worker starts independently of Academy database readiness.
+galaticContext?.ready.then(() => paymentMaintenance?.start()).catch(() => {});
 
 let shuttingDown = false;
 

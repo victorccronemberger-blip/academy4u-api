@@ -31,9 +31,10 @@ export function createEnviaWebhookHandler({ environment, store, notifications = 
     const eventType = String(request.get("x-webhook-event") ?? request.body?.type ?? "tracking").trim();
     if (!eventId || !trackingCode) return response.status(400).json({ error: "invalid_webhook" });
     const result = await store.updateShipmentFromEvent({ eventId, eventType, trackingCode,
+      occurredAt: data?.timestamp ?? data?.updatedAt ?? data?.events?.[0]?.timestamp ?? null,
       status: normalizeEnviaStatus(data?.status ?? data?.shipment_status),
       description: String(data?.status_description ?? data?.description ?? data?.status ?? "").trim().slice(0, 500) });
-    if (result?.updated && result.orderId && notifications) {
+    if (result?.updated && result.orderId && notifications && !store.enqueueNotification) {
       const order = await store.getOrderNotification?.(result.orderId);
       const key = `shipping:${eventId}:${result.orderId}`;
       if (order && await store.claimNotification?.(key)) {
