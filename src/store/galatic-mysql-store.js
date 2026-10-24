@@ -5,6 +5,7 @@ import mysql from "mysql2/promise";
 import { randomUUID } from "node:crypto";
 import { hardenedPoolOptions } from "./pool-options.js";
 import { createSensitiveDataCipher } from "../domain/sensitive-data.js";
+import { refundOperationView } from "../domain/galatic-refund-operation.js";
 
 const FINAL_PAYMENT_STATUSES = new Set(["refunded", "chargeback", "canceled"]);
 
@@ -1524,9 +1525,15 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
         `SELECT operation_id,status,provider_reference,error_code,started_at,completed_at,updated_at
            FROM galatic_shipment_operations WHERE order_id=?`, [orderId],
       );
+      const [[refundOperation]] = await pool.query("SELECT state,attempt_version,error_code FROM galatic_payment_actions WHERE order_id=? AND action='refund'", [orderId]);
       return { order: { ...order, total: Number(order.total), shipping_service_name: "Entrega via Envia" },
         items: items.map((item) => ({ ...item, quantity: Number(item.quantity), total: Number(item.total) })),
-        shipments, shipping_operation: shippingOperation ?? null, tracking };
+        shipments, shipping_operation: shippingOperation ?? null, refund_operation: refundOperationView(refundOperation), tracking };
+    },
+    async adminRefundOperation(orderId) {
+      await ensureSchema();
+      const [[row]] = await pool.query("SELECT state,attempt_version,error_code FROM galatic_payment_actions WHERE order_id=? AND action='refund'", [orderId]);
+      return refundOperationView(row);
     },
     async adminPaymentContext(orderId) {
       await ensureSchema();
@@ -1592,9 +1599,11 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       try {
         await connection.beginTransaction();
         const [result] = await connection.query("UPDATE galatic_payment_actions SET state=?,error_code=? WHERE order_id=? AND action='refund' AND attempt_version=? AND state<>'completed' AND (state<>'requested' OR ?='requested')", [state, code ? String(code).slice(0,100) : null, orderId, version, state]);
-        await connection.query("UPDATE galatic_payment_action_attempts SET state=?,error_code=? WHERE order_id=? AND action='refund' AND attempt_version=? AND state='in_progress'", [state, code ? String(code).slice(0,100) : null, orderId, version]);
+        if (result.affectedRows) await connection.query("UPDATE galatic_payment_action_attempts SET state=?,error_code=? WHERE order_id=? AND action='refund' AND attempt_version=? AND state='in_progress'", [state, code ? String(code).slice(0,100) : null, orderId, version]);
         if (result.affectedRows && state === "requested") await queueNotification(connection, `refund-requested:${orderId}`, orderId, "sendRefundRequested");
+        const [[row]] = await connection.query("SELECT state,attempt_version,error_code FROM galatic_payment_actions WHERE order_id=? AND action='refund'", [orderId]);
         await connection.commit();
+        return { updated: Boolean(result.affectedRows), operation: refundOperationView(row) };
       } catch (error) { await connection.rollback(); throw error; }
       finally { connection.release(); }
     },
@@ -1603,7 +1612,7 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       const connection = await pool.getConnection();
       try {
         await connection.beginTransaction();
-        const [rows] = await connection.query(`SELECT a.order_id,a.provider_reference,o.payment_provider_order_id,o.payment_provider_group_id,o.installments
+        const [rows] = await connection.query(`SELECT a.order_id,a.attempt_version,a.provider_reference,o.payment_provider_order_id,o.payment_provider_group_id,o.installments
           FROM galatic_payment_actions a JOIN galatic_orders o ON o.id=a.order_id
           WHERE a.action='refund' AND a.state IN ('in_progress','uncertain','requested')
           AND a.created_at<DATE_SUB(UTC_TIMESTAMP(3),INTERVAL 2 MINUTE)
@@ -1613,13 +1622,19 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           reconcile_after=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 5 MINUTE) WHERE order_id=? AND action='refund'`, [row.order_id]);
         await connection.commit();
         return rows.map((row) => ({ id: row.order_id, providerOrderId: row.payment_provider_order_id,
-          providerGroupId: row.payment_provider_group_id, installments: Number(row.installments) }));
+          providerGroupId: row.payment_provider_group_id, installments: Number(row.installments), version: Number(row.attempt_version) }));
       } catch (error) { await connection.rollback(); throw error; }
       finally { connection.release(); }
     },
-    async recordRefundReconciliationError(orderId, code) {
+    async recordRefundReconciliationError(orderId, code, version) {
       await ensureSchema();
-      await pool.query("UPDATE galatic_payment_actions SET error_code=? WHERE order_id=? AND action='refund' AND state<>'completed'", [String(code).slice(0,100), orderId]);
+      if (!Number.isSafeInteger(version) || version < 1 || code === "refund_authorization_required") return false;
+      // Generic polls cannot invalidate the specific reason reported by this
+      // attempt's POST, and an old worker cannot write into a later attempt.
+      const [result] = await pool.query(`UPDATE galatic_payment_actions SET error_code=? WHERE order_id=? AND action='refund'
+        AND attempt_version=? AND state IN ('in_progress','uncertain','requested')
+        AND (error_code IS NULL OR error_code<>'refund_authorization_required')`, [String(code).slice(0,100), orderId, version]);
+      return Boolean(result.affectedRows);
     },
     async adminRefundHistory(orderId) {
       await ensureSchema();
