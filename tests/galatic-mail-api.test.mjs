@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import nodemailer from "nodemailer";
 import { createGalaticNotifications } from "../src/integrations/email/galatic-notifications.js";
 
 test("prefers the Hostinger Mail API and verifies the configured mailbox", async (context) => {
@@ -89,4 +90,84 @@ test("renders every new Galatic lifecycle email with the official visual signatu
   assert.match(deliveries[2].html, /galatic-email-community-v1\.jpg/);
   assert.match(deliveries[7].html, /galatic-email-order-v1\.jpg/);
   assert.match(deliveries[8].html, /galatic-email-shipping-v1\.jpg/);
+  assert.match(deliveries[4].text, /Você poderá se inscrever novamente quando quiser\./);
+});
+
+test("Hostinger Mail API sends complete plaintext with exact verification, reset and unsubscribe links", async (context) => {
+  const deliveries = [];
+  context.mock.method(globalThis, "fetch", async (_url, options = {}) => {
+    deliveries.push(JSON.parse(options.body));
+    return new Response(null, { status: 204 });
+  });
+  const origin = "https://galatic.test/campaign&source=fixture";
+  const notifications = createGalaticNotifications({
+    GALATIC_MAIL_API_TOKEN: "synthetic-token",
+    GALATIC_MAIL_API_MAILBOX_ID: "synthetic-mailbox",
+    GALATIC_PUBLIC_ORIGIN: origin,
+  });
+  const customer = { first_name: "Ana <&>", email: "ana@example.test" };
+  const verificationToken = "verify+synthetic&token";
+  const resetToken = "reset+synthetic&token";
+  const newsletterToken = "newsletter+synthetic&token";
+  const unsubscribeToken = "unsubscribe+synthetic&token";
+  await notifications.sendEmailVerification({ customer, token: verificationToken });
+  await notifications.sendPasswordReset({ customer, token: resetToken });
+  await notifications.sendNewsletterVerification({ email: customer.email, token: newsletterToken });
+  await notifications.sendNewsletterConfirmed({ email: customer.email, unsubscribeToken });
+
+  const expectedLinks = [
+    `${origin}/confirmar-email/?token=${encodeURIComponent(verificationToken)}`,
+    `${origin}/recuperar-acesso/?token=${encodeURIComponent(resetToken)}`,
+    `${origin}/newsletter/confirmar/?token=${encodeURIComponent(newsletterToken)}`,
+    `${origin}/newsletter/descadastrar/?token=${encodeURIComponent(unsubscribeToken)}`,
+  ];
+  assert.equal(deliveries.length, expectedLinks.length);
+  for (const [index, link] of expectedLinks.entries()) {
+    assert.ok(deliveries[index].text.includes(link), `plaintext must include exact link ${index + 1}`);
+    assert.doesNotMatch(deliveries[index].text, /&amp;/);
+  }
+  assert.match(deliveries[0].text, /Olá, Ana <&>\./);
+  assert.match(deliveries[0].html, /Ana &lt;&amp;&gt;/);
+  assert.match(deliveries[1].text, /O link expira em 1 hora/);
+  assert.match(deliveries[2].text, /Carta da Mesa/);
+  assert.match(deliveries[3].text, /Sua inscrição está ativa/);
+  assert.match(deliveries[3].text, /Cancelar inscrição:\nhttps:\/\/galatic\.test\/campaign&source=fixture\/newsletter\/descadastrar\//);
+  assert.ok(deliveries.every((delivery) => delivery.text.includes("Central de ajuda")));
+});
+
+test("SMTP sends complete plaintext with order, shipping and tracking details; custom preview remains HTML", async (context) => {
+  const deliveries = [];
+  context.mock.method(nodemailer, "createTransport", () => ({
+    sendMail: async (message) => { deliveries.push(message); return { accepted: [message.to] }; },
+    verify: async () => true,
+  }));
+  const notifications = createGalaticNotifications({
+    GALATIC_SMTP_HOST: "smtp.fixture.invalid",
+    GALATIC_SMTP_USER: "mailer@example.test",
+    GALATIC_SMTP_PASSWORD: "synthetic-password",
+    GALATIC_PUBLIC_ORIGIN: "https://galatic.test",
+  });
+  await notifications.sendOrderCreated({
+    email: "buyer@example.test", name: "João <Mesa>", orderId: "fixture-order-12345678", totalCents: 18990, method: "pix",
+  });
+  await notifications.sendShippingUpdate({
+    email: "buyer@example.test", name: "João <Mesa>", orderId: "fixture-order-12345678", status: "in_transit",
+    trackingCode: "BR-SYNTH-123", description: "Objeto em trânsito — previsão atualizada.",
+  });
+
+  assert.equal(deliveries.length, 2);
+  assert.match(deliveries[0].text, /O pedido fixture-order-12345678 foi registrado no valor de R\$ 189,90/);
+  assert.match(deliveries[0].text, /Pagamento: Pix à vista/);
+  assert.match(deliveries[0].text, /Acompanhar pedido:\nhttps:\/\/galatic\.test\/pedido\/\?order_id=fixture-order-12345678/);
+  assert.match(deliveries[1].text, /Pedido em trânsito/);
+  assert.match(deliveries[1].text, /Código de rastreio: BR-SYNTH-123/);
+  assert.match(deliveries[1].text, /Objeto em trânsito — previsão atualizada\./);
+  assert.match(deliveries[1].text, /Acompanhar entrega:\nhttps:\/\/galatic\.test\/pedido\/\?order_id=fixture-order-12345678/);
+  assert.match(deliveries[0].html, /João &lt;Mesa&gt;/);
+
+  const preview = notifications.previewCustom({ subject: "Aviso <sintético>", message: "Linha um\nLinha dois" });
+  assert.equal(typeof preview, "string");
+  assert.match(preview, /<html lang="pt-BR">/);
+  assert.match(preview, /Aviso &lt;sintético&gt;/);
+  assert.match(preview, /Linha um<br>\s*Linha dois/);
 });
