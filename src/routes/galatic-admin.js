@@ -42,12 +42,24 @@ function adminView(admin) {
   return { id: admin.id, name: admin.name, email: admin.email, role: admin.role, status: admin.status };
 }
 
+const unknownCost = (value) => value == null || (typeof value === "string" && value.trim() === "");
+const knownCostAmount = (value) => !unknownCost(value) && ["number", "string"].includes(typeof value) && integer(value) !== null;
+function productCost(value, majorUnits = false) {
+  if (unknownCost(value)) return null;
+  const amount = Number(value);
+  const cents = majorUnits ? Math.round(amount * 100) : amount;
+  if (!["number", "string"].includes(typeof value) || !Number.isFinite(amount) || amount < 0 || !Number.isSafeInteger(cents)) {
+    throw Object.assign(new Error("Informe um custo válido ou deixe o campo vazio quando desconhecido."), { code: "invalid_product" });
+  }
+  return cents;
+}
+
 function productInput(body, existingSku = null) {
   const sku = clean(existingSku ?? body?.sku, 80).toUpperCase();
   const slug = clean(body?.slug, 100).toLowerCase();
   const name = clean(body?.name ?? body?.title, 255);
   const unitAmount = body?.unit_amount !== undefined ? integer(body.unit_amount) : Math.round(Number(body?.price ?? 0) * 100);
-  const costAmount = body?.cost_amount !== undefined ? integer(body.cost_amount) : (body?.cost === "" || body?.cost == null ? null : Math.round(Number(body.cost) * 100));
+  const costAmount = body?.cost_amount !== undefined ? productCost(body.cost_amount) : productCost(body?.cost, true);
   if (!/^[A-Z0-9_-]{2,80}$/.test(sku) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || name.length < 2 || unitAmount === null) {
     throw Object.assign(new Error("Revise SKU, slug, nome e preço."), { code: "invalid_product" });
   }
@@ -178,7 +190,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       if (!current) return response.status(404).json({ error: "product_not_found" });
       const merged = { ...current, ...request.body, slug: request.body?.slug ?? current.slug,
         name: request.body?.name ?? current.name, unit_amount: request.body?.unit_amount ?? current.unit_amount,
-        cost_amount: request.body?.cost_amount !== undefined ? request.body.cost_amount : current.cost_amount,
+        cost_amount: request.body?.cost_amount !== undefined ? request.body.cost_amount : request.body?.cost !== undefined ? undefined : current.cost_amount,
         image_url: request.body?.image_url !== undefined ? request.body.image_url : current.image_url,
         source_url: request.body?.source_url !== undefined ? request.body.source_url : current.source_url,
         category: request.body?.category !== undefined ? request.body.category : current.category,
@@ -403,7 +415,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     const catalog = { active_products: products.filter((item) => item.active === 1).length,
       missing_weight: products.filter((item) => item.active === 1 && !(Number(item.weight_grams) > 0)).length,
       missing_dimensions: products.filter((item) => item.active === 1 && ![item.length_cm,item.width_cm,item.height_cm].every((value) => Number(value) > 0)).length,
-      stock_not_managed: products.filter((item) => item.active === 1 && item.manage_stock !== 1).length };
+      stock_not_managed: products.filter((item) => item.active === 1 && item.manage_stock !== 1).length,
+      missing_cost: products.filter((item) => item.active === 1 && !knownCostAmount(item.cost_amount)).length };
     const checks = [
       { key: "database", label: "Banco Galatic isolado", required: true, passed: true },
       { key: "checkout", label: "Asaas configurado", required: true, passed: Boolean(environment.checkoutEnabled) },
@@ -412,6 +425,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       { key: "payment_maintenance", label: "Expiração segura de reservas abandonadas", required: true,
         passed: Boolean(environment.galaticPaymentMaintenanceEnabled) },
       { key: "shipping", label: "Envia e origem de postagem", required: true, passed: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin) },
+      { key: "shipping_environment", label: "Envia em ambiente de produção", required: true,
+        passed: environment.galaticEnviaEnvironment === "production" },
       { key: "shipping_webhook", label: "Webhook autenticado de rastreio Envia", required: true,
         passed: Boolean(environment.galaticEnviaWebhookSecret || environment.galaticEnviaWebhookToken) },
       { key: "catalog", label: "Catálogo com logística completa", required: true, passed: catalog.active_products > 0 && catalog.missing_weight === 0 && catalog.missing_dimensions === 0 },
@@ -420,13 +435,18 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
         passed: Boolean(environment.galaticDataEncryptionKey) },
     ];
     const sandboxReady = checks
-      .filter((item) => item.key !== "payment_environment")
+      .filter((item) => !["payment_environment", "shipping_environment"].includes(item.key))
       .every((item) => item.passed);
+    const configurationReady = checks.every((item) => item.passed);
     return response.json({
-      production_ready: checks.every((item) => item.passed),
+      scope: "technical_configuration",
+      configuration_ready: configurationReady,
+      production_ready: configurationReady, // Legacy alias: configuration only, never commercial approval.
       sandbox_ready: sandboxReady,
       payment_environment: environment.asaasEnvironment,
+      shipping_environment: environment.galaticEnviaEnvironment,
       checkout_enabled: Boolean(environment.checkoutEnabled),
+      sales_enabled: Boolean(environment.galaticSalesEnabled),
       checks,
       catalog,
     });

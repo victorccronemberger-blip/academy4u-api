@@ -17,6 +17,8 @@ Operação em preparação: o CNPJ anterior foi encerrado e o novo cadastro e ab
 
 ## Condições para abrir as vendas
 
+`GET /v1/galatic/admin/readiness` tem escopo `technical_configuration`: `configuration_ready` e seu alias legado `production_ready` verificam apenas configuração técnica, incluindo Asaas e Envia em produção. `sandbox_ready` dispensa somente esses dois ambientes de produção. `sales_enabled` informa separadamente o gate de novas vendas; `checkout_enabled` informa a configuração de pagamento. Custos ausentes e estoque sem gestão aparecem no catálogo como pendências comerciais; custo conhecido, inclusive zero, não comprova margem. Nenhum desses indicadores substitui as evidências de abertura abaixo.
+
 - Novo cadastro empresarial, documentos fiscais, recebedor de pagamentos, remetente e canais de atendimento conferidos para a nova operação.
 - Fornecedores aprovados e condições atuais recebidas; cada SKU com estoque próprio contado ou disponibilidade reservável de parceiro, custo, prazo e processo de avaria/devolução confirmados.
 - Preço com margem de contribuição calculada após custo, fretes, embalagem, impostos e taxas reais; não preencher custo desconhecido como zero.
