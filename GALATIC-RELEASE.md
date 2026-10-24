@@ -21,6 +21,7 @@ Operação em preparação: o CNPJ anterior foi encerrado e o novo cadastro e ab
 - Fornecedores aprovados e condições atuais recebidas; cada SKU com estoque próprio contado ou disponibilidade reservável de parceiro, custo, prazo e processo de avaria/devolução confirmados.
 - Preço com margem de contribuição calculada após custo, fretes, embalagem, impostos e taxas reais; não preencher custo desconhecido como zero.
 - Peso e medidas da embalagem conferidos e frete ensaiado por destino. O endereço cotado deve coincidir com o enviado à logística.
+- Cada SKU habilitado deve ter disponibilidade física comprovada para expedição na única origem configurada em `GALATIC_SHIPPING_*`. Abastecimento próprio e de parceiros exige consolidação nessa origem; itens que dependem de envio direto de outra origem permanecem indisponíveis até existir suporte comprovado a cotações e remessas separadas.
 - Pagamento e pós-venda sandbox aprovados, e-mails de conta/pedido entregues, filas sem falhas pendentes e backup restaurável comprovado.
 - Conteúdo comercial/fiscal atualizado e fichas de produto verificadas. Sem inferir número de jogadores de descrições nem chamar curadoria de ranking de vendas.
 
