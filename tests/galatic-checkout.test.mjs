@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createApp } from "../src/application.js";
+import { createApp } from "./helpers/payment-profiles.mjs";
 
 function store() {
   const state = { attached: null, completed: null, prepared: null };
@@ -80,7 +80,7 @@ test("creates a server-priced Galatic Pix order with a project-scoped reference"
   assert.equal(calls[0].value, 474.99); assert.equal(calls[0].externalReference, "galatic:52c02ff3-b755-4df5-90ba-20ea8c8bd035");
   assert.equal(galaticStore.state.prepared.couponCode, "MESA10");
   assert.deepEqual(galaticStore.state.attached, ["52c02ff3-b755-4df5-90ba-20ea8c8bd035", "pay_galatic_1", "open", {
-    method: "pix", installments: 1, installmentAmountCents: 47499, paymentFeeCents: 0, totalCents: 47499, providerGroupId: null,
+    profileId: "galatic-synthetic", method: "pix", installments: 1, installmentAmountCents: 47499, paymentFeeCents: 0, totalCents: 47499, providerGroupId: null,
   }]);
 });
 

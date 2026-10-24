@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createApp } from "../src/application.js";
+import { createApp } from "./helpers/payment-profiles.mjs";
 import { getEnvironment } from "../src/config/environment.js";
 import { createGalaticMySqlStore } from "../src/store/galatic-mysql-store.js";
 
@@ -56,12 +56,12 @@ test("acknowledges an unexpected installment webhook instead of failing with 500
   const calls = [];
   const store = {
     ...fakeGalaticStore(),
-    updatePaymentInstallmentFromWebhook: async (payload) => { calls.push(payload); return { duplicate: false }; },
+    ingestAuthenticatedEvent: async ({ profileId, event }) => { calls.push({ profileId, ...event }); return { duplicate: false, deferred: true }; },
   };
   const port = await startApp(context, { ASAAS_SANDBOX_WEBHOOK_TOKEN: "whsec_test" }, { stores: { galatic: store }, asaasClient: {} });
-  const response = await fetch(`http://127.0.0.1:${port}/v1/webhooks/asaas`, {
+  const response = await fetch(`http://127.0.0.1:${port}/v1/webhooks/asaas/profiles/galatic-synthetic`, {
     method: "POST",
-    headers: { "content-type": "application/json", "asaas-access-token": "whsec_test" },
+    headers: { "content-type": "application/json", "asaas-access-token": "synthetic-profile-token" },
     body: JSON.stringify({
       event: "PAYMENT_RECEIVED", id: "evt_installment_1",
       payment: {
@@ -76,7 +76,8 @@ test("acknowledges an unexpected installment webhook instead of failing with 500
   assert.equal(body.received, true);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].providerOrderId, "pay_galatic_1");
-  assert.equal(calls[0].installment.number, 1);
+  assert.equal(calls[0].providerGroupId, "grp_galatic_1");
+  assert.equal(calls[0].profileId, "galatic-synthetic");
 });
 
 test("fails closed with 503 when the Galatic shipping origin is not configured", async (context) => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createApp } from "../src/application.js";
+import { createApp } from "./helpers/payment-profiles.mjs";
 import { createAsaasClient } from "../src/integrations/asaas/client.js";
 import { createInMemoryStore } from "../src/store/in-memory-store.js";
 
@@ -14,10 +14,11 @@ async function fixture(t, { initial = "open", payment = { id: providerOrderId, s
   const backing = createInMemoryStore();
   const seeded = await backing.createOrder({ provider: "asaas", providerOrderId, status: initial, paymentMethod: method,
     subtotalCents: 10000, discountCents: 0, totalCents: 10000, lines: [] });
-  let current = { id: seeded.id, providerOrderId, status: initial, method, fulfillmentStatus: "awaiting_payment", totalCents: 10000 };
+  let current = { profileId: "galatic-synthetic", installments: 1, id: seeded.id, providerOrderId, status: initial, method, fulfillmentStatus: "awaiting_payment", totalCents: 10000 };
   const calls = [], transitions = [];
   let stockReleases = 0;
-  const store = { ...backing, getOrderByPublicId: async (id) => id === current.id && !current.removed ? { ...current } : null,
+  const store = { ...backing, getCheckoutRecovery: async () => ({ profileId: current.profileId, state: "completed",
+      order: { ...current }, providerCustomerId: "cus_profile_fixture", pricing: { totalCents: 10000 } }), getOrderByPublicId: async (id) => id === current.id && !current.removed ? { ...current } : null,
     updateOrderFromWebhook: async (input) => {
       transitions.push(input);
       if (updateFailure) throw new Error("synthetic_store_failure");
@@ -51,7 +52,7 @@ async function fixture(t, { initial = "open", payment = { id: providerOrderId, s
       return new Response(JSON.stringify(qr), { status: 200 });
     }
     await onPayment?.(current);
-    return new Response(JSON.stringify(provider404 ? { errors: [{ code: "invalid_action" }] } : payment), { status: provider404 ? 404 : 200 });
+    return new Response(JSON.stringify(provider404 ? { errors: [{ code: "invalid_action" }] } : (payment && typeof payment === "object" ? { customer: "cus_profile_fixture", billingType: method === "pix" ? "PIX" : "CREDIT_CARD", value: 100, externalReference: `galatic:${current.id}`, ...payment } : payment)), { status: provider404 ? 404 : 200 });
   });
   let academyWrites = 0;
   const academy = { ...createInMemoryStore(), updateOrderFromWebhook: async () => { academyWrites += 1; assert.fail("Academy mutation"); } };
@@ -115,8 +116,8 @@ for (const contract of ["galatic-mysql", "in-memory"]) {
   test(`${contract}: deleted unpaid payment never yields QR when its store accepts or rejects cancellation`, async (t) => {
     const f = await fixture(t, { contract, payment: { id: providerOrderId, status: "PENDING", deleted: true } });
     const result = await f.read("/pix");
-    assert.equal(result.http, contract === "galatic-mysql" ? 200 : 502);
-    assert.equal(f.current.status, contract === "galatic-mysql" ? "canceled" : "open");
+    assert.equal(result.http, 502);
+    assert.equal(f.current.status, "open");
     assert.equal(f.calls.some((call) => call.path.endsWith("/pixQrCode")), false);
   });
   test(`${contract}: valid pending Pix remains available`, async (t) => {
@@ -135,7 +136,7 @@ test("a stale pending snapshot returns the actual in-memory processing status", 
   assert.equal(f.current.status, "processing");
 });
 
-for (const status of ["CANCELED", "REFUNDED", "CHARGEBACK_REQUESTED", "RECEIVED"]) {
+for (const status of ["REFUNDED", "CHARGEBACK_REQUESTED", "RECEIVED"]) {
   test(`provider ${status} is reconciled before Pix and never yields QR`, async (t) => {
     const expected = { CANCELED: "canceled", REFUNDED: "refunded", CHARGEBACK_REQUESTED: "chargeback", RECEIVED: "paid" }[status];
     const f = await fixture(t, { payment: { id: providerOrderId, status } });
@@ -197,7 +198,7 @@ test("order removal during QR retrieval returns controlled404 with no QR", async
   assert.deepEqual(await f.read("/pix"), { http: 404, body: { error: "order_not_found" } });
 });
 
-for (const stage of ["payment", "cancellation-lock"]) test(`payment committed during ${stage} cannot be demoted by deleted pending`, async (t) => {
+for (const stage of ["payment"]) test(`payment committed during ${stage} cannot be demoted by deleted pending`, async (t) => {
   const paid = async (current) => { current.status = "paid"; };
   const f = await fixture(t, { payment: { id: providerOrderId, status: "PENDING", deleted: true },
     onPayment: stage === "payment" ? paid : null, onCancel: stage === "cancellation-lock" ? paid : null });

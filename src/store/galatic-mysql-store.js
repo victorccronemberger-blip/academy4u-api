@@ -1,3 +1,6 @@
+import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
+import { expandPaymentProfileSchema, createPaymentProfileStore } from "./galatic-payment-profile-store.js";
+import { paymentNamespace, paymentProfileError } from "../services/galatic-payment-profiles.js";
 import { shouldApplyTracking } from "../domain/galatic-tracking.js";
 import { matchesGalaticPayment } from "../domain/galatic-payment.js";
 import { galaticPostcode } from "../domain/galatic-address.js";
@@ -370,6 +373,8 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
         catch (error) { if (error?.code !== "ER_DUP_KEYNAME") throw error; }
       }
 
+      await expandPaymentProfileSchema(pool);
+
       const sensitiveColumns = [
         ["galatic_orders", "buyer_document", "TEXT NULL"],
         ["galatic_orders", "buyer_phone", "TEXT NULL"],
@@ -533,6 +538,7 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
   }
 
   return {
+    ...createPaymentProfileStore(pool, ensureSchema),
     ensureSchema,
     recordOperationalAlert,
     async createShippingQuotes({ destinationPostcode, items, quotes }) {
@@ -634,7 +640,7 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       if (totalCents < 50) throw Object.assign(new Error("checkout_below_minimum"), { code: "invalid_coupon" });
       return { subtotalCents, shippingCents, discountCents, couponCode: normalizedCoupon, totalCents };
     },
-    async prepareOrder({ key, fingerprint, items, quoteId, buyer, paymentMethod = "pix", installments = 1, couponCode = null }) {
+    async prepareOrder({ key, fingerprint, items, quoteId, buyer, profileId = null, paymentMethod = "pix", installments = 1, couponCode = null }) {
       await ensureSchema();
       const connection = await pool.getConnection();
       try {
@@ -654,9 +660,13 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           };
           return { kind: "pending", orderId: attempt.order_id, state: attempt.state };
         }
+        if (!profileId) throw paymentProfileError("payment_profile_unknown");
+        await this.assertPaymentProfileDispatchPhase(connection);
+        const [[profile]] = await connection.query("SELECT id FROM galatic_payment_profiles WHERE id=?", [profileId]);
+        if (!profile) throw paymentProfileError("payment_profile_unknown");
         await connection.query(
-          "INSERT INTO galatic_checkout_attempts (idempotency_key,request_fingerprint,operation_version) VALUES (?,?,1)",
-          [key, fingerprint],
+          "INSERT INTO galatic_checkout_attempts (idempotency_key,request_fingerprint,operation_version,payment_profile_id,payment_namespace,binding_version) VALUES (?,?,1,?,?,1)",
+          [key, fingerprint, profileId, paymentNamespace(profileId)],
         );
         const keys = [...new Set(items.map((item) => item.key))];
         const placeholders = keys.map(() => "?").join(",");
@@ -716,10 +726,10 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
         if (totalCents < 50) throw Object.assign(new Error("checkout_below_minimum"), { code: "invalid_coupon" });
         await connection.query(
           `INSERT INTO galatic_orders
-           (id,customer_id,payment_provider,payment_status,payment_method,installments,buyer_email,buyer_name,buyer_document,buyer_phone,shipping_address_json,
+           (id,customer_id,payment_profile_id,payment_namespace,binding_version,payment_provider,payment_status,payment_method,installments,buyer_email,buyer_name,buyer_document,buyer_phone,shipping_address_json,
             shipping_quote_id,subtotal_cents,shipping_cents,discount_cents,coupon_code,total_cents)
-           VALUES (?,?,'asaas','pending',?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [orderId, null, paymentMethod, installments, buyer.email, buyer.name,
+           VALUES (?,?,?,?,1,'asaas','pending',?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [orderId, null, profileId, paymentNamespace(profileId), paymentMethod, installments, buyer.email, buyer.name,
             sensitive.encrypt(buyer.document), sensitive.encrypt(buyer.phone),
             JSON.stringify(sensitive.encryptJson(buyer.address)), quoteId, subtotalCents, shippingCents,
             discountCents, normalizedCoupon, totalCents],
@@ -739,7 +749,7 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
         await connection.query("UPDATE galatic_shipping_quotes SET status='consumed' WHERE id=?", [quoteId]);
         await connection.query("UPDATE galatic_checkout_attempts SET order_id=? WHERE idempotency_key=?", [orderId, key]);
         await connection.commit();
-        return { kind: "created", order: { id: orderId, subtotalCents, shippingCents, discountCents, couponCode: normalizedCoupon, totalCents, serviceName: quote.service_name, lines: lines.map((line) => ({ sku: line.product.sku, title: line.product.title, quantity: line.quantity, unitAmountCents: Number(line.product.unit_amount_cents) })) } };
+        return { kind: "created", order: { id: orderId, profileId, subtotalCents, shippingCents, discountCents, couponCode: normalizedCoupon, totalCents, serviceName: quote.service_name, lines: lines.map((line) => ({ sku: line.product.sku, title: line.product.title, quantity: line.quantity, unitAmountCents: Number(line.product.unit_amount_cents) })) } };
       } catch (error) {
         await connection.rollback();
         throw error;
@@ -749,32 +759,34 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       await ensureSchema();
       const [result] = await pool.query(`UPDATE galatic_checkout_attempts
         SET state='creating',pricing_json=?,provider_customer_id=?,reconcile_after=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 2 MINUTE)
-        WHERE idempotency_key=? AND order_id=? AND state='pending' AND operation_version=1`,
-        [JSON.stringify(details.pricing), details.customerId, key, orderId]);
+        WHERE idempotency_key=? AND order_id=? AND state='pending' AND operation_version=1 AND payment_profile_id=?`,
+        [JSON.stringify(details.pricing), details.customerId, key, orderId, details.profileId]);
       if (result.affectedRows !== 1) throw Object.assign(new Error("payment_operation_already_started"), { code: "payment_operation_already_started" });
+      await this.claimExternalOperation({ orderId, profileId: details.profileId, operation: "payment" });
     },
     async markPaymentCreationUncertain(key, code) {
       await ensureSchema();
-      await pool.query("UPDATE galatic_checkout_attempts SET state='uncertain',error_code=? WHERE idempotency_key=? AND state='creating'",
+      await pool.query("UPDATE galatic_checkout_attempts SET state='uncertain',error_code=? WHERE idempotency_key=? AND state IN ('pending','creating')",
         [String(code || "unknown").slice(0, 100), key]);
     },
     async getCheckoutAttemptResult(key) {
       await ensureSchema();
-      const [[attempt]] = await pool.query("SELECT state,order_id,response_status,response_json FROM galatic_checkout_attempts WHERE idempotency_key=?", [key]);
+      const [[attempt]] = await pool.query("SELECT state,order_id,response_status,response_json,request_fingerprint,payment_profile_id FROM galatic_checkout_attempts WHERE idempotency_key=?", [key]);
       if (!attempt) return null;
-      return { state: attempt.state, orderId: attempt.order_id, response: attempt.state === "completed" ? {
+      return { state: attempt.state, orderId: attempt.order_id, profileId: attempt.payment_profile_id, fingerprint: attempt.request_fingerprint, response: attempt.state === "completed" ? {
         status: Number(attempt.response_status), body: typeof attempt.response_json === "string" ? JSON.parse(attempt.response_json) : attempt.response_json } : null };
     },
     async getCheckoutRecovery({ key = null, orderId = null }) {
       await ensureSchema();
-      const [[attempt]] = await pool.query(`SELECT a.idempotency_key,a.state,a.pricing_json,a.provider_customer_id,o.id,
-        o.payment_provider_order_id,o.payment_method,o.installments,o.subtotal_cents,o.shipping_cents,o.discount_cents,o.coupon_code,o.total_cents
+      const [[attempt]] = await pool.query(`SELECT a.idempotency_key,a.state,a.pricing_json,a.provider_customer_id,a.payment_profile_id,o.payment_profile_id order_profile_id,o.id,
+        o.payment_provider_order_id,o.payment_provider_group_id,o.payment_method,o.installments,o.subtotal_cents,o.shipping_cents,o.discount_cents,o.coupon_code,o.total_cents
         FROM galatic_checkout_attempts a JOIN galatic_orders o ON o.id=a.order_id
         WHERE ${key ? "a.idempotency_key=?" : "o.id=?"}`, [key || orderId]);
       if (!attempt) return null;
-      return { key: attempt.idempotency_key, state: attempt.state, providerCustomerId: attempt.provider_customer_id,
+      if (attempt.payment_profile_id !== attempt.order_profile_id) throw paymentProfileError("payment_profile_binding_conflict");
+      return { profileId: attempt.payment_profile_id, key: attempt.idempotency_key, state: attempt.state, providerCustomerId: attempt.provider_customer_id,
         pricing: typeof attempt.pricing_json === "string" ? JSON.parse(attempt.pricing_json) : attempt.pricing_json,
-        order: { id: attempt.id, providerOrderId: attempt.payment_provider_order_id, method: attempt.payment_method,
+        order: { profileId: attempt.payment_profile_id, providerGroupId: attempt.payment_provider_group_id, id: attempt.id, providerOrderId: attempt.payment_provider_order_id, method: attempt.payment_method,
           installments: Number(attempt.installments), subtotalCents: Number(attempt.subtotal_cents), shippingCents: Number(attempt.shipping_cents),
           discountCents: Number(attempt.discount_cents), couponCode: attempt.coupon_code, totalCents: Number(attempt.total_cents) } };
     },
@@ -783,11 +795,15 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       const connection = await pool.getConnection();
       try {
         await connection.beginTransaction();
-        const [[order]] = await connection.query("SELECT payment_provider_order_id,payment_provider_group_id FROM galatic_orders WHERE id=? FOR UPDATE", [orderId]);
-        if (!order || (order.payment_provider_order_id && order.payment_provider_order_id !== providerOrderId
+        const [[order]] = await connection.query("SELECT payment_profile_id,payment_provider_order_id,payment_provider_group_id FROM galatic_orders WHERE id=? FOR UPDATE", [orderId]);
+        if (!order || !details.profileId || order.payment_profile_id !== details.profileId || (order.payment_provider_order_id && order.payment_provider_order_id !== providerOrderId
           && (!details.providerGroupId || order.payment_provider_group_id !== details.providerGroupId))) {
           throw Object.assign(new Error("payment_reference_conflict"), { code: "payment_reference_conflict" });
         }
+        const [collisions] = await connection.query(`SELECT id FROM galatic_orders
+          WHERE payment_namespace=? AND id<>? AND (payment_provider_order_id=? OR (? IS NOT NULL AND payment_provider_group_id=?)) FOR UPDATE`,
+          [paymentNamespace(details.profileId), orderId, providerOrderId, details.providerGroupId ?? null, details.providerGroupId ?? null]);
+        if (collisions.length) throw paymentProfileError("payment_profile_reference_conflict");
         await connection.query(`UPDATE galatic_orders SET payment_provider_order_id=COALESCE(payment_provider_order_id,?),
           installment_amount_cents=?,payment_fee_cents=?,payment_provider_group_id=COALESCE(payment_provider_group_id,?),
           total_cents=COALESCE(?,total_cents) WHERE id=?`,
@@ -798,13 +814,8 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       } catch (error) { await connection.rollback(); throw error; }
       finally { connection.release(); }
       // All entry points share the monotonic financial transition.
-      await this.updateOrderFromWebhook({ provider: "asaas", providerOrderId, status,
+      await this.updateOrderFromWebhook({ profileId: details.profileId, provider: "asaas", providerOrderId, status,
         externalReference: `galatic:${orderId}`, providerGroupId: details.providerGroupId ?? null });
-      const [deferred] = await pool.query(`SELECT event_id,provider_order_id,status,external_reference,provider_group_id,payment_evidence_json
-        FROM galatic_payment_events WHERE applied_at IS NULL AND (provider_order_id=? OR external_reference=?) ORDER BY received_at,event_id`,
-        [providerOrderId, `galatic:${orderId}`]);
-      for (const event of deferred) await this.updateOrderFromWebhook({ provider: "asaas", providerOrderId: event.provider_order_id,
-        status: event.status, eventId: event.event_id, externalReference: event.external_reference, providerGroupId: event.provider_group_id, paymentEvidence: typeof event.payment_evidence_json === "string" ? JSON.parse(event.payment_evidence_json) : event.payment_evidence_json });
     },
     async completeCheckoutAttempt(key, response) {
       await ensureSchema();
@@ -841,16 +852,17 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
     async getOrderByPublicId(orderId) {
       await ensureSchema();
       const [[row]] = await pool.query(
-        "SELECT id,payment_provider_order_id,payment_status,payment_method,installments,installment_amount_cents,subtotal_cents,shipping_cents,total_cents,fulfillment_status FROM galatic_orders WHERE id=?", [orderId],
+        "SELECT id,payment_profile_id,payment_provider_group_id,payment_provider_order_id,payment_status,payment_method,installments,installment_amount_cents,subtotal_cents,shipping_cents,total_cents,fulfillment_status FROM galatic_orders WHERE id=?", [orderId],
       );
-      return row ? { id: row.id, providerOrderId: row.payment_provider_order_id, status: row.payment_status, method: row.payment_method, installments: Number(row.installments), installmentAmountCents: row.installment_amount_cents === null ? null : Number(row.installment_amount_cents), subtotalCents: Number(row.subtotal_cents), shippingCents: Number(row.shipping_cents), totalCents: Number(row.total_cents), fulfillmentStatus: row.fulfillment_status } : null;
+      return row ? { profileId: row.payment_profile_id, providerGroupId: row.payment_provider_group_id, id: row.id, providerOrderId: row.payment_provider_order_id, status: row.payment_status, method: row.payment_method, installments: Number(row.installments), installmentAmountCents: row.installment_amount_cents === null ? null : Number(row.installment_amount_cents), subtotalCents: Number(row.subtotal_cents), shippingCents: Number(row.shipping_cents), totalCents: Number(row.total_cents), fulfillmentStatus: row.fulfillment_status } : null;
     },
-    async getOrderByProviderOrderId(provider, providerOrderId) {
+    async getOrderByProviderOrderId(provider, providerOrderId, binding = {}) {
+      if (!binding.profileId) throw paymentProfileError("payment_profile_unknown");
       await ensureSchema();
       const [[row]] = await pool.query(
-        "SELECT id,payment_provider_order_id,payment_status,subtotal_cents,shipping_cents,total_cents,fulfillment_status FROM galatic_orders WHERE payment_provider=? AND payment_provider_order_id=?", [provider, providerOrderId],
+        "SELECT id,payment_profile_id,payment_provider_group_id,payment_provider_order_id,payment_status,subtotal_cents,shipping_cents,total_cents,fulfillment_status FROM galatic_orders WHERE payment_namespace=? AND payment_provider=? AND payment_provider_order_id=?", [paymentNamespace(binding.profileId), provider, providerOrderId],
       );
-      return row ? { id: row.id, providerOrderId: row.payment_provider_order_id, status: row.payment_status, subtotalCents: Number(row.subtotal_cents), shippingCents: Number(row.shipping_cents), totalCents: Number(row.total_cents), fulfillmentStatus: row.fulfillment_status } : null;
+      return row ? { profileId: row.payment_profile_id, providerGroupId: row.payment_provider_group_id, id: row.id, providerOrderId: row.payment_provider_order_id, status: row.payment_status, subtotalCents: Number(row.subtotal_cents), shippingCents: Number(row.shipping_cents), totalCents: Number(row.total_cents), fulfillmentStatus: row.fulfillment_status } : null;
     },
     async getOrderNotification(orderId) {
       await ensureSchema();
@@ -927,35 +939,71 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       } catch (error) { await connection.rollback(); throw error; }
       finally { connection.release(); }
     },
-    async updateOrderFromWebhook({ provider, providerOrderId, status, eventId, externalReference = null, providerGroupId = null, paymentEvidence = null }) {
+    async claimPendingAuthenticatedEvents({ profileId = null, orderId = null, limit = 50 } = {}) {
       await ensureSchema();
+      const [rows] = await pool.query(`SELECT e.internal_event_id,e.event_id,e.payment_profile_id,e.status,o.id order_id
+        FROM galatic_payment_events e JOIN galatic_orders o ON o.payment_profile_id=e.payment_profile_id
+          AND (e.external_reference=CONCAT('galatic:',o.id) OR e.provider_order_id=o.payment_provider_order_id)
+        WHERE e.applied_at IS NULL AND e.payment_profile_id IS NOT NULL AND o.payment_provider_order_id IS NOT NULL
+          AND (e.reconcile_after IS NULL OR e.reconcile_after<=UTC_TIMESTAMP(3))
+          AND (? IS NULL OR e.payment_profile_id=?) AND (? IS NULL OR o.id=?)
+        ORDER BY ROW_NUMBER() OVER (PARTITION BY e.payment_profile_id ORDER BY e.reconciliation_attempts,e.received_at,e.internal_event_id),e.payment_profile_id LIMIT ?`,
+        [profileId, profileId, orderId, orderId, Math.min(100, Math.max(1, Number(limit) || 50))]);
+      const claimed = [];
+      for (const row of rows) {
+        const [claim] = await pool.query(`UPDATE galatic_payment_events SET reconciliation_attempts=reconciliation_attempts+1,
+          reconcile_after=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 5 MINUTE) WHERE internal_event_id=? AND applied_at IS NULL
+          AND (reconcile_after IS NULL OR reconcile_after<=UTC_TIMESTAMP(3))`, [row.internal_event_id]);
+        if (claim.affectedRows === 1) claimed.push({ profileId: row.payment_profile_id, eventId: row.event_id, status: row.status, orderId: row.order_id });
+      }
+      return claimed;
+    },
+    async ingestAuthenticatedEvent({ profileId, event }) {
+      if (!profileId || !event?.eventId) throw paymentProfileError("payment_profile_unknown");
+      return this.updateOrderFromWebhook({ ...event, profileId, receiptOnly: true });
+    },
+    async updateOrderFromWebhook({ receiptOnly = false, profileId = null, completeGroupProof = false, actionVersion = null, actionReference = null, provider, providerOrderId, status, eventId, externalReference = null, providerGroupId = null, paymentEvidence = null }) {
+      await ensureSchema();
+      const namespace = paymentNamespace(profileId);
       const connection = await pool.getConnection();
       try {
         await connection.beginTransaction();
+        let receiptSeen = false;
         if (eventId) {
           const [seen] = await connection.query(`SELECT event_id,applied_at,provider_order_id,status,external_reference,provider_group_id,payment_evidence_json
-            FROM galatic_payment_events WHERE event_id=? FOR UPDATE`, [eventId]);
+            FROM galatic_payment_events WHERE payment_namespace=? AND event_id=? FOR UPDATE`, [namespace, eventId]);
           if (seen[0]?.applied_at) { await connection.rollback(); return { duplicate: true }; }
           if (seen[0]) {
             // Receipt is immutable. A duplicate cannot replace rejected evidence
             // with a different body while keeping the original event identity.
-            providerOrderId = seen[0].provider_order_id; status = seen[0].status;
+            receiptSeen = true;
+            providerOrderId = seen[0].provider_order_id; if (!completeGroupProof) status = seen[0].status;
             externalReference = seen[0].external_reference; providerGroupId = seen[0].provider_group_id;
             paymentEvidence = typeof seen[0].payment_evidence_json === "string" ? JSON.parse(seen[0].payment_evidence_json) : seen[0].payment_evidence_json;
           }
         }
-        let [[order]] = await connection.query(
-          `SELECT id,payment_status,coupon_code,coupon_redeemed,stock_released_at,payment_provider_order_id,payment_provider_group_id
-           FROM galatic_orders WHERE payment_provider=? AND (payment_provider_order_id=? OR (? IS NOT NULL AND payment_provider_group_id=?)) FOR UPDATE`,
-          [provider, providerOrderId, providerGroupId, providerGroupId]);
-        if (!order && /^galatic:[0-9a-f-]{36}$/i.test(externalReference || "")) {
-          const [[candidate]] = await connection.query(`SELECT o.id,o.payment_status,o.coupon_code,o.coupon_redeemed,o.stock_released_at,
+        if (receiptOnly) {
+          await connection.query(`INSERT INTO galatic_payment_events
+            (internal_event_id,payment_profile_id,payment_namespace,event_id,provider,provider_order_id,status,external_reference,provider_group_id,payment_evidence_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE event_id=event_id`,
+            [randomUUID(), profileId, namespace, eventId, provider, providerOrderId, status, externalReference, providerGroupId, paymentEvidence ? JSON.stringify(paymentEvidence) : null]);
+          await connection.commit();
+          return { deferred: true, duplicate: receiptSeen, profileId, eventId, providerOrderId, providerGroupId, externalReference };
+        }
+        const [matchedOrders] = await connection.query(
+          `SELECT id,payment_profile_id,payment_method,installments,payment_status,coupon_code,coupon_redeemed,stock_released_at,payment_provider_order_id,payment_provider_group_id
+           FROM galatic_orders WHERE payment_namespace=? AND payment_provider=? AND (payment_provider_order_id=? OR (? IS NOT NULL AND payment_provider_group_id=?)) FOR UPDATE`,
+          [namespace, provider, providerOrderId, providerGroupId, providerGroupId]);
+        let order = matchedOrders.length === 1 ? matchedOrders[0] : null;
+        if (!matchedOrders.length && !order && /^galatic:[0-9a-f-]{36}$/i.test(externalReference || "")) {
+          const [[candidate]] = await connection.query(`SELECT o.id,o.payment_profile_id,o.payment_status,o.coupon_code,o.coupon_redeemed,o.stock_released_at,
             o.payment_provider_order_id,o.payment_provider_group_id,o.payment_method,o.installments,a.pricing_json,a.provider_customer_id
             FROM galatic_orders o JOIN galatic_checkout_attempts a ON a.order_id=o.id
-            WHERE o.id=? AND o.payment_provider=? AND a.state IN ('creating','uncertain','attached','completed') FOR UPDATE`,
-            [externalReference.slice(8), provider]);
+            WHERE o.id=? AND o.payment_profile_id=? AND a.payment_profile_id=o.payment_profile_id AND o.payment_provider=? AND a.state IN ('creating','uncertain','attached','completed') FOR UPDATE`,
+            [externalReference.slice(8), profileId, provider]);
           const pricing = typeof candidate?.pricing_json === "string" ? JSON.parse(candidate.pricing_json) : candidate?.pricing_json;
-          if (candidate && matchesGalaticPayment(paymentEvidence, { order: { id: candidate.id, method: candidate.payment_method,
+          if (candidate && (completeGroupProof || normalizeAsaasPaymentStatus(paymentEvidence?.status) === status)
+            && matchesGalaticPayment(paymentEvidence, { order: { id: candidate.id, method: candidate.payment_method,
             installments: Number(candidate.installments) }, pricing, providerCustomerId: candidate.provider_customer_id }, { installment: Boolean(providerGroupId) })
             && (!candidate.payment_provider_order_id || candidate.payment_provider_order_id === providerOrderId || candidate.payment_provider_group_id === providerGroupId)) {
             order = candidate;
@@ -966,6 +1014,8 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           }
         }
         let validationError = null;
+        if (order && (!profileId || order.payment_profile_id !== profileId)) { validationError = "payment_profile_unknown"; order = null; }
+        if (order && Number(order.installments) > 1 && !completeGroupProof) { validationError = "complete_group_proof_required"; order = null; }
         if (order && externalReference && externalReference !== `galatic:${order.id}`) {
           validationError = "payment_reference_conflict"; order = null;
         }
@@ -977,20 +1027,26 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           // their post-sale reconciliation while checking method/value/reference.
           const valid = matchesGalaticPayment(paymentEvidence, { order: { id: order.id, method: expected.payment_method,
             installments: Number(expected.installments) }, pricing: storedPricing ?? { totalCents: Number(expected.total_cents) },
-            providerCustomerId: expected.provider_customer_id || paymentEvidence.customer }, { installment: Boolean(providerGroupId) });
-          if (!valid) { validationError = "payment_evidence_mismatch"; order = null; }
+            providerCustomerId: expected.provider_customer_id }, { installment: Boolean(providerGroupId) });
+          if (!valid || (!completeGroupProof && normalizeAsaasPaymentStatus(paymentEvidence.status) !== status)) { validationError = "payment_evidence_mismatch"; order = null; }
+        }
+        if (order && status === "refunded" && actionVersion !== null) {
+          const [[action]] = await connection.query("SELECT payment_profile_id,attempt_version,provider_reference FROM galatic_payment_actions WHERE order_id=? AND action='refund' FOR UPDATE", [order.id]);
+          if (action?.payment_profile_id !== profileId || action.attempt_version !== actionVersion || action.provider_reference !== actionReference) {
+            validationError = "payment_action_snapshot_conflict"; order = null;
+          }
         }
         const previousStatus = order?.payment_status ?? null;
         const resolvedStatus = order ? nextPaymentStatus(previousStatus, status) : status;
         if (eventId) {
           await connection.query(
             `INSERT INTO galatic_payment_events
-             (event_id,provider,provider_order_id,status,external_reference,provider_group_id,payment_evidence_json) VALUES (?,?,?,?,?,?,?)
+             (internal_event_id,payment_profile_id,payment_namespace,event_id,provider,provider_order_id,status,external_reference,provider_group_id,payment_evidence_json) VALUES (?,?,?,?,?,?,?,?,?,?)
              ON DUPLICATE KEY UPDATE event_id=event_id`,
-            [eventId, provider, providerOrderId, status, externalReference, providerGroupId, paymentEvidence ? JSON.stringify(paymentEvidence) : null],
+            [randomUUID(), profileId, namespace, eventId, provider, providerOrderId, status, externalReference, providerGroupId, paymentEvidence ? JSON.stringify(paymentEvidence) : null],
           );
         }
-        if (validationError && eventId) await connection.query("UPDATE galatic_payment_events SET validation_error=? WHERE event_id=?", [validationError, eventId]);
+        if (validationError && eventId) await connection.query("UPDATE galatic_payment_events SET validation_error=? WHERE payment_namespace=? AND event_id=?", [validationError, namespace, eventId]);
         if (order) {
           if (["failed", "canceled"].includes(resolvedStatus) && previousStatus !== "paid" && !order.stock_released_at) {
             await releaseReservedStock(connection, order.id);
@@ -1026,16 +1082,16 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           await finishCanceledAttempt(connection, order.id);
           await queueNotification(connection, `payment-canceled:${order.id}`, order.id, "sendPaymentCanceled");
         }
-        if (order && resolvedStatus === "refunded") {
-          await connection.query("UPDATE galatic_payment_actions SET state='completed',error_code=NULL WHERE order_id=? AND action='refund'", [order.id]);
+        if (order && resolvedStatus === "refunded" && completeGroupProof) {
+          await connection.query("UPDATE galatic_payment_actions SET state='completed',error_code=NULL WHERE order_id=? AND action='refund' AND payment_profile_id=? AND provider_reference=? AND reference_kind=? AND snapshot_json IS NOT NULL", [order.id, profileId, order.payment_provider_group_id || order.payment_provider_order_id, order.payment_provider_group_id ? "installment" : "payment"]);
           await connection.query(`UPDATE galatic_payment_action_attempts h JOIN galatic_payment_actions a ON a.order_id=h.order_id AND a.action=h.action AND a.attempt_version=h.attempt_version
-            SET h.state='completed',h.error_code=NULL WHERE h.order_id=? AND h.action='refund'`, [order.id]);
+            SET h.state='completed',h.error_code=NULL WHERE h.order_id=? AND h.action='refund' AND a.payment_profile_id=? AND a.state='completed'`, [order.id, profileId]);
         }
         if (order && ["paid", "refunded", "chargeback"].includes(resolvedStatus)) {
           await queueNotification(connection, `payment:${resolvedStatus}:${order.id}`, order.id,
             resolvedStatus === "paid" ? "sendPaymentConfirmed" : "sendPaymentReversed", { reason: resolvedStatus });
         }
-        if (order && eventId) await connection.query("UPDATE galatic_payment_events SET applied_at=UTC_TIMESTAMP(3) WHERE event_id=?", [eventId]);
+        if (order && eventId) await connection.query("UPDATE galatic_payment_events SET applied_at=UTC_TIMESTAMP(3) WHERE payment_namespace=? AND event_id=?", [namespace, eventId]);
         await connection.commit();
         return {
           id: order?.id ?? null,
@@ -1538,22 +1594,22 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
     async adminPaymentContext(orderId) {
       await ensureSchema();
       const [[row]] = await pool.query(
-        `SELECT id,payment_provider_order_id,payment_provider_group_id,payment_status,
+        `SELECT id,payment_profile_id,payment_provider_order_id,payment_provider_group_id,payment_status,
                 fulfillment_status,stock_released_at
          FROM galatic_orders WHERE id=?`, [orderId],
       );
-      return row ? { id: row.id, providerOrderId: row.payment_provider_order_id,
-        providerGroupId: row.payment_provider_group_id, status: row.payment_status,
+      return row ? { profileId: row.payment_profile_id, providerGroupId: row.payment_provider_group_id, id: row.id, providerOrderId: row.payment_provider_order_id, status: row.payment_status,
         fulfillmentStatus: row.fulfillment_status, stockReleasedAt: row.stock_released_at } : null;
     },
     async claimPaymentReconciliations(limit = 25) {
       await ensureSchema();
       const connection = await pool.getConnection();
       try {
+        await connection.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
         await connection.beginTransaction();
         const [rows] = await connection.query(`SELECT idempotency_key,order_id FROM galatic_checkout_attempts
           WHERE state IN ('creating','uncertain','attached') AND (reconcile_after IS NULL OR reconcile_after<=UTC_TIMESTAMP(3))
-          ORDER BY updated_at LIMIT ? FOR UPDATE SKIP LOCKED`, [Math.max(1, Math.min(50, Number(limit) || 25))]);
+          AND payment_profile_id IS NOT NULL ORDER BY reconciliation_attempts,updated_at,payment_profile_id LIMIT ? FOR UPDATE SKIP LOCKED`, [Math.max(1, Math.min(50, Number(limit) || 25))]);
         for (const row of rows) await connection.query(`UPDATE galatic_checkout_attempts SET reconciliation_attempts=reconciliation_attempts+1,
           reconcile_after=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 5 MINUTE) WHERE idempotency_key=?`, [row.idempotency_key]);
         await connection.commit();
@@ -1565,33 +1621,7 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       await ensureSchema();
       await pool.query("UPDATE galatic_checkout_attempts SET error_code=? WHERE idempotency_key=?", [String(code || "unknown").slice(0, 100), key]);
     },
-    async claimRefund(orderId, adminId) {
-      await ensureSchema();
-      const connection = await pool.getConnection();
-      try {
-        await connection.beginTransaction();
-        const [[order]] = await connection.query("SELECT payment_status,payment_provider_order_id,payment_provider_group_id FROM galatic_orders WHERE id=? FOR UPDATE", [orderId]);
-        if (!order || order.payment_status !== "paid") throw Object.assign(new Error("order_not_paid"), { code: "order_not_paid" });
-        const [[existing]] = await connection.query("SELECT state,attempt_version,provider_reference,admin_id,error_code FROM galatic_payment_actions WHERE order_id=? AND action='refund' FOR UPDATE", [orderId]);
-        if (existing && existing.state !== "rejected") { await connection.commit(); return { claimed: false, state: existing.state, version: existing.attempt_version }; }
-        const providerReference = order.payment_provider_group_id || order.payment_provider_order_id;
-        if (!providerReference) throw new Error("payment_reference_missing");
-        const version = existing ? Number(existing.attempt_version) + 1 : 1;
-        if (existing) {
-          await connection.query(`INSERT IGNORE INTO galatic_payment_action_attempts
-            (order_id,action,attempt_version,state,provider_reference,admin_id,error_code) VALUES (?,'refund',?,?,?,?,?)`,
-            [orderId, existing.attempt_version, existing.state, existing.provider_reference, existing.admin_id, existing.error_code]);
-          await connection.query(`UPDATE galatic_payment_actions SET state='in_progress',attempt_version=?,error_code=NULL,
-            provider_reference=?,admin_id=?,reconcile_after=NULL,created_at=UTC_TIMESTAMP(3) WHERE order_id=? AND action='refund' AND state='rejected'`,
-            [version, providerReference, adminId, orderId]);
-        } else await connection.query("INSERT INTO galatic_payment_actions (order_id,action,provider_reference,admin_id) VALUES (?,'refund',?,?)", [orderId, providerReference, adminId]);
-        await connection.query(`INSERT INTO galatic_payment_action_attempts
-          (order_id,action,attempt_version,state,provider_reference,admin_id) VALUES (?,'refund',?,'in_progress',?,?)`, [orderId, version, providerReference, adminId]);
-        await connection.commit();
-        return { claimed: true, providerReference, group: Boolean(order.payment_provider_group_id), version };
-      } catch (error) { await connection.rollback(); throw error; }
-      finally { connection.release(); }
-    },
+    async claimRefund(orderId, adminId) { return this.claimBoundAction({ orderId, adminId, kind: "refund" }); },
     async finishRefundRequest(orderId, state, code = null, version = 1) {
       await ensureSchema();
       if (!["requested", "uncertain", "rejected"].includes(state)) throw new Error("invalid_refund_state");
@@ -1611,20 +1641,19 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       await ensureSchema();
       const connection = await pool.getConnection();
       try {
+        await connection.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
         await connection.beginTransaction();
-        const [rows] = await connection.query(`SELECT a.order_id,a.attempt_version,a.provider_reference,o.payment_provider_order_id,o.payment_provider_group_id,o.installments
-          FROM galatic_payment_actions a JOIN galatic_orders o ON o.id=a.order_id
-          WHERE a.action='refund' AND a.state IN ('in_progress','uncertain','requested')
-          AND a.created_at<DATE_SUB(UTC_TIMESTAMP(3),INTERVAL 2 MINUTE)
-          AND (a.reconcile_after IS NULL OR a.reconcile_after<=UTC_TIMESTAMP(3))
-          ORDER BY a.updated_at LIMIT ? FOR UPDATE SKIP LOCKED`, [Math.min(50,Math.max(1,Number(limit)||20))]);
+        const [rows] = await connection.query(`SELECT order_id,payment_profile_id,attempt_version,provider_reference,reference_kind,snapshot_json
+          FROM galatic_payment_actions WHERE action='refund' AND payment_profile_id IS NOT NULL AND snapshot_json IS NOT NULL
+          AND state IN ('in_progress','uncertain','requested') AND created_at<DATE_SUB(UTC_TIMESTAMP(3),INTERVAL 2 MINUTE)
+          AND (reconcile_after IS NULL OR reconcile_after<=UTC_TIMESTAMP(3))
+          ORDER BY reconciliation_attempts,updated_at,payment_profile_id LIMIT ? FOR UPDATE SKIP LOCKED`, [Math.min(50,Math.max(1,Number(limit)||20))]);
         for (const row of rows) await connection.query(`UPDATE galatic_payment_actions SET reconciliation_attempts=reconciliation_attempts+1,
-          reconcile_after=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 5 MINUTE) WHERE order_id=? AND action='refund'`, [row.order_id]);
+          reconcile_after=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 5 MINUTE) WHERE order_id=? AND action='refund' AND attempt_version=?`, [row.order_id, row.attempt_version]);
         await connection.commit();
-        return rows.map((row) => ({ id: row.order_id, providerOrderId: row.payment_provider_order_id,
-          providerGroupId: row.payment_provider_group_id, installments: Number(row.installments), version: Number(row.attempt_version) }));
-      } catch (error) { await connection.rollback(); throw error; }
-      finally { connection.release(); }
+        return rows.map((row) => ({ ...(typeof row.snapshot_json === "string" ? JSON.parse(row.snapshot_json) : row.snapshot_json),
+          profileId: row.payment_profile_id, providerReference: row.provider_reference, referenceKind: row.reference_kind, version: Number(row.attempt_version) }));
+      } catch (error) { await connection.rollback(); throw error; } finally { connection.release(); }
     },
     async recordRefundReconciliationError(orderId, code, version) {
       await ensureSchema();
@@ -1656,26 +1685,31 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       await ensureSchema();
       const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
       const [rows] = await pool.query(
-        `SELECT id,payment_provider_order_id,payment_provider_group_id,payment_status,payment_method,created_at
+        `SELECT id,payment_profile_id,payment_provider_order_id,payment_provider_group_id,payment_status,payment_method,created_at
          FROM galatic_orders
-         WHERE stock_released_at IS NULL AND paid_at IS NULL
+         WHERE payment_profile_id IS NOT NULL AND stock_released_at IS NULL AND paid_at IS NULL
            AND payment_status IN ('pending','open','processing','overdue')
            AND ((payment_method='pix' AND created_at<=?) OR (payment_method='credit_card' AND created_at<=?))
-         ORDER BY created_at ASC LIMIT ?`, [pixBefore, cardBefore, safeLimit],
+         ORDER BY ROW_NUMBER() OVER (PARTITION BY payment_profile_id ORDER BY created_at,id),payment_profile_id LIMIT ?`, [pixBefore, cardBefore, safeLimit],
       );
-      return rows.map((row) => ({ id: row.id, providerOrderId: row.payment_provider_order_id,
+      return rows.map((row) => ({ profileId: row.payment_profile_id, id: row.id, providerOrderId: row.payment_provider_order_id,
         providerGroupId: row.payment_provider_group_id, status: row.payment_status,
         method: row.payment_method, createdAt: row.created_at }));
     },
-    async adminCancelUnpaidOrder(orderId) {
+    async adminCancelUnpaidOrder(orderId, proof = {}) {
       await ensureSchema();
       const connection = await pool.getConnection();
       try {
         await connection.beginTransaction();
         const [[order]] = await connection.query(
-          "SELECT payment_status,stock_released_at FROM galatic_orders WHERE id=? FOR UPDATE", [orderId],
+          "SELECT payment_profile_id,payment_provider_order_id,payment_status,stock_released_at FROM galatic_orders WHERE id=? FOR UPDATE", [orderId],
         );
-        if (!order || ["paid", "refunded", "chargeback"].includes(order.payment_status)) {
+        if (!order?.payment_profile_id || order.payment_profile_id !== proof.profileId) throw paymentProfileError("payment_profile_unknown");
+        if (order.payment_provider_order_id) {
+          const [[action]] = await connection.query("SELECT state FROM galatic_payment_actions WHERE order_id=? AND action='cancel' AND payment_profile_id=? AND attempt_version=? FOR UPDATE", [orderId, proof.profileId, proof.version]);
+          if (!proof.completeUnpaidProof || action?.state !== "in_progress") throw paymentProfileError("payment_cancellation_proof_required");
+        }
+        if (["paid", "refunded", "chargeback"].includes(order.payment_status)) {
           await connection.rollback();
           return false;
         }
@@ -1684,7 +1718,10 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
           await connection.commit();
           return true;
         }
-        const [[operation]] = await connection.query("SELECT state,operation_version FROM galatic_checkout_attempts WHERE order_id=? FOR UPDATE", [orderId]);
+        const [[operation]] = await connection.query("SELECT state,operation_version,payment_profile_id FROM galatic_checkout_attempts WHERE order_id=? FOR UPDATE", [orderId]);
+        const [[claim]] = await connection.query("SELECT 1 present FROM galatic_external_operation_claims WHERE order_id=? LIMIT 1", [orderId]);
+        if (!order.payment_provider_order_id && (claim || !operation || operation.payment_profile_id !== proof.profileId
+          || operation.state !== "pending" || Number(operation.operation_version) !== 1)) throw paymentProfileError("payment_reconciliation_required");
         if (["creating", "uncertain"].includes(operation?.state) || (operation && Number(operation.operation_version) !== 1 && operation.state === "pending")) throw Object.assign(new Error("payment_reconciliation_required"), { code: "payment_reconciliation_required" });
         if (!order.stock_released_at) await releaseReservedStock(connection, orderId);
         await connection.query(
@@ -1713,7 +1750,7 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       await ensureSchema();
       const [[order]] = await pool.query(
         `SELECT o.id,o.payment_status,o.fulfillment_status,o.buyer_name,o.buyer_email,o.buyer_phone,o.buyer_document,
-                o.payment_provider,o.payment_provider_order_id,o.payment_provider_group_id,o.payment_method,o.installments,o.total_cents,
+                o.payment_profile_id,o.payment_provider,o.payment_provider_order_id,o.payment_provider_group_id,o.payment_method,o.installments,o.total_cents,
                 o.shipping_address_json,q.service_code,q.service_name
            FROM galatic_orders o LEFT JOIN galatic_shipping_quotes q ON q.id=o.shipping_quote_id WHERE o.id=?`, [orderId],
       );

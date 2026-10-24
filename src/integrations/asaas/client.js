@@ -117,6 +117,7 @@ export function createAsaasClient(environment, fetchImplementation = fetch) {
   }
 
   return Object.freeze({
+    getWallets: () => requestWithRetry("/wallets/", { timeoutMs: 15_000 }),
     verifyCredentials: () => requestWithRetry("/myAccount/accountNumber", { timeoutMs: 15_000 }),
     getAccountFees: () => requestWithRetry("/myAccount/fees/", { timeoutMs: 15_000 }),
     simulatePayment: (payload) => request("/payments/simulate", { method: "POST", body: payload, timeoutMs: 15_000 }),

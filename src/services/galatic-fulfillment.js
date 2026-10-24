@@ -1,7 +1,6 @@
+import { loadGalaticPaymentProof } from "./galatic-payment-proof.js";
 import { closedGalaticFinancialGate } from "./galatic-financial-gate.js";
 import { galaticPostcode, assertShippingAddress } from "../domain/galatic-address.js";
-import { matchesGalaticPayment } from "../domain/galatic-payment.js";
-import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 const digits = (value) => String(value ?? "").replace(/\D/g, "");
 const text = (value, maximum = 180) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maximum);
 
@@ -31,59 +30,23 @@ function shipmentView(row) {
     currency: row.currency, created_at: row.created_at };
 }
 
-export function createGalaticFulfillmentService({ environment, store, enviaClient, asaasClient = null, notifications = null, financialGate = closedGalaticFinancialGate }) {
+export function createGalaticFulfillmentService({ environment, store, enviaClient, paymentProfiles = null, notifications = null, financialGate = closedGalaticFinancialGate }) {
   async function verifyProductionPayment(order) {
-    if (environment.galaticEnviaEnvironment !== "production") return;
     const unverified = () => Object.assign(new Error("shipping_payment_unverified"), { code: "shipping_payment_unverified" });
-    // Only the currently selected production account can authorize a real label.
-    // Never switch credentials or mutate the order while obtaining this evidence.
-    if (environment.asaasEnvironment !== "production" || environment.asaasApiOrigin !== "https://api.asaas.com/v3"
-      || !asaasClient?.getPayment || !store.getCheckoutRecovery) throw unverified();
     try {
-      const count = Number(order.installments);
-      const totalCents = Number(order.total_cents);
-      if (order.payment_provider !== "asaas" || !order.payment_provider_order_id
-        || !["pix", "credit_card"].includes(order.payment_method)
-        || !Number.isSafeInteger(count) || count < 1 || count > 10
-        || (order.payment_method === "pix" && count !== 1)
-        || !Number.isSafeInteger(totalCents) || totalCents <= 0) throw unverified();
-      const operation = await store.getCheckoutRecovery({ orderId: order.id });
-      if (operation && (operation.order?.id !== order.id || operation.order.method !== order.payment_method
-        || Number(operation.order.installments) !== count || Number(operation.order.totalCents) !== totalCents
-        || (operation.pricing && (operation.pricing.totalCents !== totalCents || !operation.providerCustomerId)))) throw unverified();
-      const linked = await asaasClient.getPayment(order.payment_provider_order_id);
-      if (linked?.id !== order.payment_provider_order_id || typeof linked.customer !== "string" || !linked.customer.trim()) throw unverified();
-      // Older checkout rows may not contain historical customer/pricing bindings.
-      // Their stored payment ID, exact order reference, method and full value must
-      // still match in production. The current customer only binds that evidence
-      // together; it is not persisted as an invented historical association.
-      const evidence = { order: { id: order.id, method: order.payment_method, installments: count },
-        pricing: { totalCents }, providerCustomerId: operation?.providerCustomerId || linked.customer };
-      const eligible = (payment) => matchesGalaticPayment(payment, evidence, { installment: count > 1 })
-        && normalizeAsaasPaymentStatus(payment.status) === "paid"
-        && !(Number(payment.refundedValue) > 0) && !(Array.isArray(payment.refunds) && payment.refunds.length);
-      if (!eligible(linked)) throw unverified();
-      if (count === 1) {
-        if (order.payment_provider_group_id) throw unverified();
-        return;
-      }
-      if (!asaasClient.findPaymentsByExternalReference || !linked.installment
-        || (order.payment_provider_group_id && order.payment_provider_group_id !== linked.installment)) throw unverified();
-      const result = await asaasClient.findPaymentsByExternalReference(`galatic:${order.id}`);
-      const payments = result?.data;
-      // Checkout supports at most ten installments; a truncated/ambiguous result
-      // cannot prove the complete plan. Fail closed instead of authorizing a part.
-      if (!Array.isArray(payments) || result.hasMore !== false || payments.length !== count
-        || (result.totalCount !== undefined && Number(result.totalCount) !== payments.length)
-        || new Set(payments.map((payment) => payment?.id)).size !== count
-        || !payments.some((payment) => payment?.id === linked.id)
-        || !payments.every((payment) => eligible(payment) && payment.installment === linked.installment)
-        || Math.abs(payments.reduce((sum, payment) => sum + Math.round(Number(payment.value) * 100), 0) - totalCents) > 1) throw unverified();
-    } catch {
-      // 404, timeout, unconfigured provider and invalid evidence all block before
-      // acquiring a shipment operation; none changes the local payment state.
-      throw unverified();
-    }
+      const bound = await paymentProfiles.getVerifiedClient({ profileId: order.payment_profile_id }, "fulfillment");
+      if (environment.galaticEnviaEnvironment === "production" && (bound.environment !== "production" || !bound.commercialApproved)) throw unverified();
+      if (order.payment_provider !== "asaas" || !["pix", "credit_card"].includes(order.payment_method ?? "pix")) throw unverified();
+      const proof = await loadGalaticPaymentProof({ store, paymentProfiles,
+        order: { id: order.id, profileId: order.payment_profile_id }, capability: "fulfillment" });
+      if (!proof.paid) throw unverified();
+      if (environment.galaticEnviaEnvironment === "production"
+        && (proof.environment !== "production" || !proof.commercialApproved)) throw unverified();
+      if (order.payment_provider_order_id !== proof.providerOrderId || order.payment_provider_group_id !== proof.providerGroupId
+        || Number(order.total_cents) !== proof.operation.pricing.totalCents
+        || (order.payment_method !== undefined && order.payment_method !== proof.operation.order.method)
+        || (order.installments !== undefined && Number(order.installments) !== proof.operation.order.installments)) throw unverified();
+    } catch { throw unverified(); }
   }
   async function notifyShipping(orderId, key, status, trackingCode, description) {
     if (store.enqueueNotification) return store.enqueueNotification(key, orderId, "sendShippingUpdate", { status, trackingCode, description });
@@ -125,6 +88,7 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
     let stored;
     let trackingCode;
     try {
+      await paymentProfiles.getVerifiedClient({ profileId: order.payment_profile_id }, "fulfillment");
       const result = await enviaClient.generateLabel({ origin, destination, packages,
         shipment: { type: 1, carrier: selected.carrier, service: selected.service },
         settings: { printFormat: "PDF", printSize: "STOCK_4X6", currency: "BRL", comments: `Galatic ${order.id}` } });
@@ -183,7 +147,7 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
     return { canceled: true, balance_returned: Boolean(result?.data?.balanceReturned), shipment: shipmentView(await store.shipmentForOrder(orderId)) };
   }
 
-  return Object.freeze({ createLabel: (...args) => financialGate.run(() => createLabel(...args)),
+  return Object.freeze({ verifyProductionPayment, createLabel: (...args) => financialGate.run(() => createLabel(...args)),
     refresh: (...args) => financialGate.run(() => refresh(...args)),
     cancel: (...args) => financialGate.run(() => cancel(...args)) });
 }

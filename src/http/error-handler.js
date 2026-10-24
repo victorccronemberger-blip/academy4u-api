@@ -28,6 +28,9 @@ export function jsonErrorHandler(error, request, response, next) {
     });
     return;
   }
+  if (error?.status === 503 && /^payment_profile_[a-z_]+$/.test(error?.code ?? "")) {
+    response.status(503).json({ error: error.code, message: "Pagamento temporariamente indisponível." }); return;
+  }
   // Fila do pool MySQL saturada: é sobrecarga transitória, não falha interna.
   // 503 com Retry-After sinaliza ao cliente/orquestrador para tentar depois.
   if (isPoolQueueFullError(error)) {

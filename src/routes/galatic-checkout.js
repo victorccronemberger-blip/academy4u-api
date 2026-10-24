@@ -1,3 +1,6 @@
+import { createGalaticDeferredEventReconciliation } from "../services/galatic-payment-events.js";
+import { loadGalaticPaymentProof } from "../services/galatic-payment-proof.js";
+import { paymentProfileError } from "../services/galatic-payment-profiles.js";
 import { closedGalaticFinancialGate, financialRoute } from "../services/galatic-financial-gate.js";
 import { createGalaticPaymentRecovery } from "../services/galatic-payment-recovery.js";
 import { galaticPaymentResponse, matchesGalaticPayment } from "../domain/galatic-payment.js";
@@ -17,7 +20,6 @@ const MAX_ITEM_QUANTITY = 3;
 const FINAL_ORDER_STATUSES = new Set(["canceled", "refunded", "chargeback"]);
 const PIX_PAYABLE_STATUSES = new Set(["pending", "open", "processing", "overdue"]);
 const PIX_PROVIDER_STATUSES = new Set(["PENDING", "OVERDUE"]);
-const SETTLED_PAYMENT_STATUSES = new Set(["paid", "refunded", "chargeback"]);
 
 function exactObject(value, fields, label) {
   if (!value || Array.isArray(value) || typeof value !== "object") throw new GalaticInputError(`${label} inválido.`);
@@ -91,11 +93,6 @@ function asaasCustomer(buyer) {
     postalCode: buyer.address.postCode, address: buyer.address.street, addressNumber: buyer.address.number,
     complement: buyer.address.complement || undefined, province: buyer.address.district };
 }
-async function customerId(client, buyer) {
-  const existing = await client.findCustomersByDocument(buyer.document);
-  if (existing?.data?.[0]?.id) return existing.data[0].id;
-  return (await client.createCustomer(asaasCustomer(buyer)))?.id;
-}
 function pix(result) {
   if (!result?.encodedImage || !result?.payload) return null;
   return { qrCodeBase64: result.encodedImage, emv: result.payload, expiresAt: result.expirationDate ?? null };
@@ -147,28 +144,32 @@ function simulatedCardPricing(baseCents, installments, simulation) {
     installmentCents: Math.ceil(totalCents / installments), source: "asaas_sales_simulator" };
 }
 
-export function createGalaticCheckoutRouter(express, { environment, asaasClient, store, notifications = null,
+export function createGalaticCheckoutRouter(express, { environment, paymentProfiles, store, notifications = null,
   financialGate = closedGalaticFinancialGate,
   botChallenge = { verify: (_request, _response, next) => next() } }) {
   const router = express.Router();
   const consume = store.consumeRateLimit?.bind(store);
   const writeLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 12, prefix: "galatic-checkout", consume });
   const readLimiter = createFixedWindowLimiter({ windowMs: 60_000, limit: 60, prefix: "galatic-order", consume });
-  const recoverPayment = store.getCheckoutRecovery ? createGalaticPaymentRecovery({ store, asaasClient, financialGate }) : null;
-  let feeCache = null;
+  const reconcileDeferred = createGalaticDeferredEventReconciliation({ store, paymentProfiles, financialGate });
+  const recoverPayment = store.getCheckoutRecovery ? createGalaticPaymentRecovery({ store, paymentProfiles, financialGate }) : null;
+  const feeCache = new Map();
   const simulationCache = new Map();
-  async function accountFees() {
-    if (feeCache?.expiresAt > Date.now()) return feeCache.value;
-    const value = await asaasClient.getAccountFees();
-    feeCache = { value, expiresAt: Date.now() + 15 * 60_000 };
+  async function accountFees(bound) {
+    const cacheKey = `${bound.profileId}:${bound.generation}`;
+    const cached = feeCache.get(cacheKey);
+    if (cached?.expiresAt > Date.now()) return cached.value;
+    const value = await bound.client.getAccountFees();
+    feeCache.set(cacheKey, { value, expiresAt: Date.now() + 15 * 60_000 });
     return value;
   }
-  async function providerCardPricing(baseCents, installments) {
+  async function providerCardPricing(bound, baseCents, installments) {
+    const asaasClient = bound.client;
     if (installments === 1) {
       return { baseCents, totalCents: baseCents, feeCents: 0, percentage: 0,
         installmentCents: baseCents, source: "galatic_interest_free_1x" };
     }
-    const cacheKey = `${baseCents}:${installments}`;
+    const cacheKey = `${bound.profileId}:${bound.generation}:${baseCents}:${installments}`;
     const cached = simulationCache.get(cacheKey);
     if (cached?.expiresAt > Date.now()) return cached.value;
     if (typeof asaasClient?.simulatePayment === "function") {
@@ -187,25 +188,30 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
         console.error("Asaas sales simulation unavailable; using account fee fallback", { status: error?.status, code: error?.code });
       }
     }
-    const fallback = { ...cardPricing(baseCents, installments, await accountFees()), source: "asaas_account_fees" };
+    const fallback = { ...cardPricing(baseCents, installments, await accountFees(bound)), source: "asaas_account_fees" };
     simulationCache.set(cacheKey, { value: fallback, expiresAt: Date.now() + 5 * 60_000 });
     return fallback;
   }
-  router.get("/status", (_request, response) => response.json({ enabled: environment.checkoutEnabled && environment.galaticSalesEnabled && financialGate.enabled,
-    financialOperationsEnabled: financialGate.enabled,
-    salesEnabled: environment.galaticSalesEnabled, reason: !environment.galaticSalesEnabled ? "store_not_open" : !financialGate.enabled ? "financial_operations_paused" : !environment.checkoutEnabled ? "payment_unavailable" : null,
-    message: !environment.galaticSalesEnabled ? "A Galatic está preparando sua nova operação. Vendas em breve." : null, provider: "asaas", environment: environment.asaasEnvironment,
-    methods: environment.checkoutEnabled && environment.galaticSalesEnabled && financialGate.enabled ? ["pix", "credit_card"] : [], cardMode: "embedded_api", cardInstallmentMaximum: 10,
-    cardInterest: "asaas_fees_passed_to_customer_from_2x", cardInterestFreeInstallments: 1, pixInstallment: false,
-    maximumItemQuantity: MAX_ITEM_QUANTITY }));
+  router.get("/status", async (_request, response) => {
+    const readiness = await paymentProfiles.getPaymentReadiness();
+    const enabled = readiness.checkoutAvailable && environment.galaticSalesEnabled && financialGate.enabled;
+    return response.json({ ...readiness, enabled, financialOperationsEnabled: financialGate.enabled,
+      salesEnabled: environment.galaticSalesEnabled, reason: !environment.galaticSalesEnabled ? "store_not_open"
+        : !financialGate.enabled ? "financial_operations_paused" : !enabled ? "payment_unavailable" : null,
+      message: !environment.galaticSalesEnabled ? "A Galatic está preparando sua nova operação. Vendas em breve." : null,
+      provider: "asaas", environment: readiness.paymentEnvironment, methods: enabled ? ["pix", "credit_card"] : [],
+      cardMode: "embedded_api", cardInstallmentMaximum: 10, cardInterest: "asaas_fees_passed_to_customer_from_2x",
+      cardInterestFreeInstallments: 1, pixInstallment: false, maximumItemQuantity: MAX_ITEM_QUANTITY });
+  });
 
   financialRoute(router, financialGate, "post", "/installments", readLimiter,
     allowBodyFields(["items", "shipping", "couponCode", "buyerEmail"]), async (request, response) => {
     if (!financialGate.enabled) return financialGate.paused(response);
-    if (!environment.checkoutEnabled || !asaasClient || !store.previewCheckout) {
+    if (!paymentProfiles || !store.previewCheckout) {
       return response.status(503).json({ error: "checkout_unavailable", message: "Condições de pagamento temporariamente indisponíveis." });
     }
     try {
+      const bound = await paymentProfiles.resolveNewOrderProfile();
       const cart = items(request.body?.items);
       exactObject(request.body?.shipping, ["quoteId"], "Frete");
       const quoteId = String(request.body?.shipping?.quoteId ?? "").trim();
@@ -217,7 +223,7 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       const preview = await store.previewCheckout({ items: cart, quoteId, buyerEmail, couponCode });
       const plans = await Promise.all(Array.from({ length: 10 }, async (_, index) => {
         const installments = index + 1;
-        const pricing = await providerCardPricing(preview.totalCents, installments);
+        const pricing = await providerCardPricing(bound, preview.totalCents, installments);
         return { installments, installmentCents: pricing.installmentCents, totalCents: pricing.totalCents,
           feeCents: pricing.feeCents, percentage: pricing.percentage, source: pricing.source };
       }));
@@ -241,7 +247,7 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
     if (!environment.galaticSalesEnabled) return response.status(503).json({ error: "store_not_open", message: "A Galatic está preparando sua nova operação. Vendas em breve." });
     if (!financialGate.enabled) return financialGate.paused(response);
     if (request.body?.website) return response.status(400).json({ error: "invalid_checkout", message: "Não foi possível validar a solicitação." });
-    if (!environment.checkoutEnabled || !asaasClient) return response.status(503).json({ error: "checkout_unavailable", message: "Pagamento temporariamente indisponível." });
+    if (!paymentProfiles) return response.status(503).json({ error: "checkout_unavailable", message: "Pagamento temporariamente indisponível." });
     let key; let cart; let customer; let quoteId; let selectedPayment;
     try {
       key = uuid(request); cart = items(request.body?.items); customer = buyer(request.body?.buyer);
@@ -254,11 +260,21 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       throw error;
     }
     const fingerprint = createHash("sha256").update(JSON.stringify(request.body)).digest("hex");
-    let prepared;
+    let prepared; let bound;
     const couponCode = String(request.body?.couponCode ?? "").trim().toUpperCase() || null;
     if (couponCode && !/^[A-Z0-9_-]{3,40}$/.test(couponCode)) return response.status(400).json({ error: "invalid_coupon", message: "Cupom inválido." });
     financialGate.assertEnabled();
-    try { prepared = await store.prepareOrder({ key, fingerprint, items: cart, quoteId, buyer: customer,
+    try {
+      const previous = await store.getCheckoutAttemptResult?.(key);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) return response.status(409).json({ error: "idempotency_conflict" });
+        if (previous.response) return response.status(previous.response.status).json(previous.response.body);
+        const recovered = recoverPayment ? await recoverPayment({ key }).catch(() => null) : null;
+        return recovered ? response.status(recovered.status).json(recovered.body)
+          : response.status(202).json({ error: "payment_reconciliation_pending", orderId: previous.orderId });
+      }
+      bound = await paymentProfiles.resolveNewOrderProfile();
+      prepared = await store.prepareOrder({ key, fingerprint, items: cart, quoteId, buyer: customer, profileId: bound.profileId,
       paymentMethod: selectedPayment.method, installments: selectedPayment.installments, couponCode }); }
     catch (error) {
       if (["product_unavailable", "insufficient_stock", "invalid_shipping_quote", "shipping_quote_mismatch"].includes(error?.code)) {
@@ -277,10 +293,25 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
         message: "Estamos confirmando esta tentativa. Nao inicie outro pagamento." });
     }
     if (prepared.kind === "replay") return response.status(prepared.response.status).json(prepared.response.body);
+    const asaasClient = bound.client;
+    if (prepared.order.profileId !== bound.profileId) throw paymentProfileError("payment_profile_binding_conflict");
     const order = { ...prepared.order, method: selectedPayment.method, installments: selectedPayment.installments };
-    let operationClaimAttempted = false; let creationResponseReceived = false; let creationRejected = false;
+    let customerClaimAttempted = false; let operationClaimAttempted = false; let creationResponseReceived = false; let creationRejected = false;
     try {
-      const providerCustomerId = await customerId(asaasClient, customer);
+      const existing = await asaasClient.findCustomersByDocument(customer.document);
+      let providerCustomerId = existing?.data?.[0]?.id;
+      if (!providerCustomerId) {
+        customerClaimAttempted = true;
+        const token = await store.claimExternalOperation({ orderId: order.id, profileId: bound.profileId, operation: "customer" });
+        try {
+          providerCustomerId = (await asaasClient.createCustomer(asaasCustomer(customer)))?.id;
+          if (!providerCustomerId) throw paymentProfileError("asaas_customer_missing");
+          await store.finishExternalOperation({ orderId: order.id, operation: "customer", token, providerReference: providerCustomerId });
+        } catch (error) {
+          await store.finishExternalOperation({ orderId: order.id, operation: "customer", token, errorCode: error?.code ?? "customer_uncertain" }).catch(() => {});
+          throw error;
+        }
+      }
       if (!providerCustomerId) throw new Error("asaas_customer_missing");
       const dueDate = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
       let pricing = { baseCents: order.totalCents, totalCents: order.totalCents, feeCents: 0, percentage: 0,
@@ -288,7 +319,7 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       const payload = { customer: providerCustomerId, billingType: selectedPayment.method === "pix" ? "PIX" : "CREDIT_CARD",
         dueDate, description: `Pedido Galatic ${order.id}`, externalReference: `galatic:${order.id}` };
       if (selectedPayment.method === "credit_card") {
-        pricing = await providerCardPricing(order.totalCents, selectedPayment.installments);
+        pricing = await providerCardPricing(bound, order.totalCents, selectedPayment.installments);
         payload.creditCard = selectedPayment.card;
         payload.creditCardHolderInfo = cardHolderInfo({ ...customer, cpfCnpj: customer.document, mobilePhone: customer.phone, ip: request.ip });
         payload.remoteIp = request.ip;
@@ -299,7 +330,7 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       } else payload.value = pricing.totalCents / 100;
       operationClaimAttempted = true;
       financialGate.assertEnabled();
-      await store.beginPaymentCreation(key, order.id, { pricing, customerId: providerCustomerId });
+      await store.beginPaymentCreation(key, order.id, { profileId: bound.profileId, pricing, customerId: providerCustomerId });
       let providerPayment;
       try { providerPayment = await asaasClient.createPayment(payload); creationResponseReceived = true; }
       catch (error) { creationRejected = [400, 422].includes(error?.status); throw error; }
@@ -308,13 +339,15 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       }
       const status = normalizeAsaasPaymentStatus(providerPayment?.status);
       financialGate.assertEnabled();
-      await store.attachPayment(order.id, providerPayment.id, status, { method: selectedPayment.method,
+      await store.attachPayment(order.id, providerPayment.id, order.installments > 1 ? "processing" : status, { profileId: bound.profileId, method: selectedPayment.method,
         installments: selectedPayment.installments, installmentAmountCents: pricing.installmentCents,
         paymentFeeCents: pricing.feeCents, totalCents: pricing.totalCents, providerGroupId: providerPayment?.installment ?? null });
-      if (selectedPayment.method === "pix") try { await asaasClient.updatePayment(providerPayment.id, { billingType: "PIX", value: pricing.totalCents / 100,
+      await reconcileDeferred({ profileId: bound.profileId, orderId: order.id });
+      const attached = await store.getOrderByPublicId(order.id);
+      if (selectedPayment.method === "pix" && attached?.status !== "paid") try { await asaasClient.updatePayment(providerPayment.id, { billingType: "PIX", value: pricing.totalCents / 100,
         dueDate: providerPayment.dueDate, description: `Pedido Galatic ${order.id}`, externalReference: `galatic:${order.id}` }); } catch (error) { console.error("Could not update Galatic Pix", { code: error?.code, status: error?.status }); }
       let instructions = null;
-      if (selectedPayment.method === "pix") try { instructions = pix(await asaasClient.getPixQrCode(providerPayment.id)); } catch (error) { console.error("Galatic Pix is being prepared", { code: error?.code, status: error?.status }); }
+      if (selectedPayment.method === "pix" && attached?.status !== "paid") try { instructions = pix(await asaasClient.getPixQrCode(providerPayment.id)); } catch (error) { console.error("Galatic Pix is being prepared", { code: error?.code, status: error?.status }); }
       const current = await store.getOrderByPublicId(order.id);
       const result = galaticPaymentResponse(order, pricing, current?.status ?? status, instructions);
       financialGate.assertEnabled();
@@ -326,7 +359,7 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       return response.status(201).json(result.body);
     } catch (error) {
       console.error("Galatic Asaas checkout failed", { code: error?.code, status: error?.status, type: error?.name });
-      const definitiveFailure = !operationClaimAttempted || (creationRejected && !creationResponseReceived);
+      const definitiveFailure = (!customerClaimAttempted && !operationClaimAttempted) || (creationRejected && !creationResponseReceived);
       if (definitiveFailure) {
         const cardRejected = selectedPayment.method === "credit_card" && creationRejected;
         const result = { status: cardRejected ? 400 : 502, body: { error: cardRejected ? "credit_card_refused" : "checkout_provider_error",
@@ -363,7 +396,7 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
     if (!/^[0-9a-f-]{36}$/i.test(id)) return response.status(404).json({ error: "order_not_found" });
     let order = await store.getOrderByPublicId(id);
     if (!order) return response.status(404).json({ error: "order_not_found" });
-    if (financialGate.enabled && order.providerOrderId && asaasClient) {
+    if (financialGate.enabled && order.providerOrderId && paymentProfiles) {
       try { order = (await refreshPublicOrder(order)).order; }
       catch { order = await latestPublicOrder(order); }
     }
@@ -371,7 +404,7 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
   });
   financialRoute(router, financialGate, "get", "/orders/:orderId/pix", readLimiter, async (request, response) => {
     const id = String(request.params.orderId ?? ""); let order = /^[0-9a-f-]{36}$/i.test(id) ? await store.getOrderByPublicId(id) : null;
-    if (!order?.providerOrderId || order.method !== "pix" || !asaasClient) return response.status(404).json({ error: "order_not_found" });
+    if (!order?.providerOrderId || order.method !== "pix" || !paymentProfiles) return response.status(404).json({ error: "order_not_found" });
     if (!PIX_PAYABLE_STATUSES.has(order.status)) return response.json({ id, status: order.status });
     if (!financialGate.enabled) return financialGate.paused(response);
     try {
@@ -383,7 +416,8 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
       if (refreshed.payment?.deleted || !PIX_PROVIDER_STATUSES.has(refreshed.payment?.status?.trim().toUpperCase())) {
         throw new Error("payment_not_payable");
       }
-      const instructions = pix(await asaasClient.getPixQrCode(order.providerOrderId));
+      const bound = await paymentProfiles.getVerifiedClient(order, "read");
+      const instructions = pix(await bound.client.getPixQrCode(order.providerOrderId));
       // Cancellation or a webhook can commit while the QR request is in flight.
       order = await store.getOrderByPublicId(id);
       if (!order) throw new Error("order_not_found");
@@ -406,24 +440,14 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
   async function refreshPublicOrder(order) {
     financialGate.assertEnabled();
     if (FINAL_ORDER_STATUSES.has(order.status)) return { order, payment: null };
-    const payment = await asaasClient.getPayment(order.providerOrderId);
-    if (payment?.id !== order.providerOrderId || typeof payment.status !== "string" || !payment.status.trim()) {
-      throw new Error("invalid_payment_snapshot");
-    }
-    financialGate.assertEnabled();
+    const proof = await loadGalaticPaymentProof({ store, paymentProfiles, order });
+    const payment = proof.payment;
     order = await store.getOrderByPublicId(order.id);
-    if (!order) throw new Error("order_not_found");
-    if (order.providerOrderId !== payment.id) throw new Error("payment_binding_changed");
+    if (!order || order.profileId !== proof.profileId || order.providerOrderId !== payment.id) throw paymentProfileError("payment_binding_changed");
     if (FINAL_ORDER_STATUSES.has(order.status)) return { order, payment };
-    const status = normalizeAsaasPaymentStatus(payment.status);
-    if (payment.deleted && !SETTLED_PAYMENT_STATUSES.has(status)) {
-      // This store operation checks paid/reversed state under its transaction lock.
-      // A read followed by an unconditional canceled webhook could race a payment.
-      if (payment.deleted === true && PIX_PROVIDER_STATUSES.has(payment.status.trim().toUpperCase())
-        && order.status !== "paid" && store.adminCancelUnpaidOrder) await store.adminCancelUnpaidOrder(order.id);
-    // Failed attempts have released their reservation; stale unpaid snapshots cannot reopen them.
-    } else if (status !== order.status && !(order.status === "failed" && PIX_PAYABLE_STATUSES.has(status))) {
-      await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: order.providerOrderId, status });
+    if (proof.status && proof.status !== order.status && proof.status !== "canceled" && !(order.status === "failed" && PIX_PAYABLE_STATUSES.has(proof.status))) {
+      await store.updateOrderFromWebhook({ profileId: proof.profileId, provider: "asaas", providerOrderId: order.providerOrderId,
+        providerGroupId: proof.providerGroupId, status: proof.status, completeGroupProof: true });
     }
     const current = await store.getOrderByPublicId(order.id);
     if (!current) throw new Error("order_not_found");
