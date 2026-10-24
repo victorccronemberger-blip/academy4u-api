@@ -13,6 +13,10 @@ class GalaticInputError extends Error {
 }
 
 const MAX_ITEM_QUANTITY = 3;
+const FINAL_ORDER_STATUSES = new Set(["canceled", "refunded", "chargeback"]);
+const PIX_PAYABLE_STATUSES = new Set(["pending", "open", "processing", "overdue"]);
+const PIX_PROVIDER_STATUSES = new Set(["PENDING", "OVERDUE"]);
+const SETTLED_PAYMENT_STATUSES = new Set(["paid", "refunded", "chargeback"]);
 
 function exactObject(value, fields, label) {
   if (!value || Array.isArray(value) || typeof value !== "object") throw new GalaticInputError(`${label} inválido.`);
@@ -347,18 +351,71 @@ export function createGalaticCheckoutRouter(express, { environment, asaasClient,
   router.get("/orders/:orderId", readLimiter, async (request, response) => {
     const id = String(request.params.orderId ?? "");
     if (!/^[0-9a-f-]{36}$/i.test(id)) return response.status(404).json({ error: "order_not_found" });
-    const order = await store.getOrderByPublicId(id);
+    let order = await store.getOrderByPublicId(id);
     if (!order) return response.status(404).json({ error: "order_not_found" });
     if (order.providerOrderId && asaasClient) {
-      try { const payment = await asaasClient.getPayment(order.providerOrderId); const status = normalizeAsaasPaymentStatus(payment?.status); if (status !== order.status) await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: order.providerOrderId, status }); order.status = status; } catch {}
+      try { order = (await refreshPublicOrder(order)).order; }
+      catch { order = await latestPublicOrder(order); }
     }
     response.set("Cache-Control", "no-store").json(order);
   });
   router.get("/orders/:orderId/pix", readLimiter, async (request, response) => {
-    const id = String(request.params.orderId ?? ""); const order = /^[0-9a-f-]{36}$/i.test(id) ? await store.getOrderByPublicId(id) : null;
+    const id = String(request.params.orderId ?? ""); let order = /^[0-9a-f-]{36}$/i.test(id) ? await store.getOrderByPublicId(id) : null;
     if (!order?.providerOrderId || order.method !== "pix" || !asaasClient) return response.status(404).json({ error: "order_not_found" });
-    try { const payment = await asaasClient.getPayment(order.providerOrderId); const status = normalizeAsaasPaymentStatus(payment?.status); if (status === "paid") return response.json({ id, status }); const instructions = pix(await asaasClient.getPixQrCode(order.providerOrderId)); return instructions ? response.json({ id, status, pix: instructions }) : response.status(202).json({ id, status, pixPending: true }); }
-    catch { return response.status(502).json({ error: "pix_retrieval_failed" }); }
+    if (!PIX_PAYABLE_STATUSES.has(order.status)) return response.json({ id, status: order.status });
+    try {
+      const refreshed = await refreshPublicOrder(order);
+      order = await store.getOrderByPublicId(id);
+      if (!order) throw new Error("order_not_found");
+      if (!PIX_PAYABLE_STATUSES.has(order.status)) return response.json({ id, status: order.status });
+      if (order.providerOrderId !== refreshed.payment?.id) throw new Error("payment_binding_changed");
+      if (refreshed.payment?.deleted || !PIX_PROVIDER_STATUSES.has(refreshed.payment?.status?.trim().toUpperCase())) {
+        throw new Error("payment_not_payable");
+      }
+      const instructions = pix(await asaasClient.getPixQrCode(order.providerOrderId));
+      // Cancellation or a webhook can commit while the QR request is in flight.
+      order = await store.getOrderByPublicId(id);
+      if (!order) throw new Error("order_not_found");
+      if (!PIX_PAYABLE_STATUSES.has(order.status)) return response.json({ id, status: order.status });
+      if (order.providerOrderId !== refreshed.payment.id) throw new Error("payment_binding_changed");
+      return instructions ? response.json({ id, status: order.status, pix: instructions }) : response.status(202).json({ id, status: order.status, pixPending: true });
+    } catch {
+      if (!order) return response.status(404).json({ error: "order_not_found" });
+      order = await latestPublicOrder(order);
+      if (!PIX_PAYABLE_STATUSES.has(order.status)) return response.json({ id, status: order.status });
+      return response.status(502).json({ error: "pix_retrieval_failed" });
+    }
   });
+
+  async function latestPublicOrder(order) {
+    try { return await store.getOrderByPublicId(order.id) ?? order; }
+    catch { return order; }
+  }
+
+  async function refreshPublicOrder(order) {
+    if (FINAL_ORDER_STATUSES.has(order.status)) return { order, payment: null };
+    const payment = await asaasClient.getPayment(order.providerOrderId);
+    if (payment?.id !== order.providerOrderId || typeof payment.status !== "string" || !payment.status.trim()) {
+      throw new Error("invalid_payment_snapshot");
+    }
+    order = await store.getOrderByPublicId(order.id);
+    if (!order) throw new Error("order_not_found");
+    if (order.providerOrderId !== payment.id) throw new Error("payment_binding_changed");
+    if (FINAL_ORDER_STATUSES.has(order.status)) return { order, payment };
+    const status = normalizeAsaasPaymentStatus(payment.status);
+    if (payment.deleted && !SETTLED_PAYMENT_STATUSES.has(status)) {
+      // This store operation checks paid/reversed state under its transaction lock.
+      // A read followed by an unconditional canceled webhook could race a payment.
+      if (payment.deleted === true && PIX_PROVIDER_STATUSES.has(payment.status.trim().toUpperCase())
+        && order.status !== "paid" && store.adminCancelUnpaidOrder) await store.adminCancelUnpaidOrder(order.id);
+    // Failed attempts have released their reservation; stale unpaid snapshots cannot reopen them.
+    } else if (status !== order.status && !(order.status === "failed" && PIX_PAYABLE_STATUSES.has(status))) {
+      await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: order.providerOrderId, status });
+    }
+    const current = await store.getOrderByPublicId(order.id);
+    if (!current) throw new Error("order_not_found");
+    if (current.providerOrderId !== payment.id) throw new Error("payment_binding_changed");
+    return { order: current, payment };
+  }
   return router;
 }
