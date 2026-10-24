@@ -1,3 +1,4 @@
+import { closedGalaticFinancialGate } from "../services/galatic-financial-gate.js";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { normalizeEnviaStatus } from "../services/galatic-fulfillment.js";
 
@@ -22,9 +23,10 @@ function authorized(request, environment) {
   return false;
 }
 
-export function createEnviaWebhookHandler({ environment, store, notifications = null }) {
-  return async function enviaWebhook(request, response) {
+export function createEnviaWebhookHandler({ environment, store, notifications = null, financialGate = closedGalaticFinancialGate }) {
+  return financialGate.track(async function enviaWebhook(request, response) {
     if (!authorized(request, environment)) return response.status(401).json({ error: "invalid_webhook_signature" });
+    if (!financialGate.enabled) return financialGate.paused(response);
     const data = request.body?.data ?? request.body;
     const trackingCode = String(data?.tracking_number ?? data?.trackingNumber ?? "").trim();
     const eventId = String(request.get("x-webhook-id") ?? request.body?.id ?? "").trim();
@@ -44,5 +46,5 @@ export function createEnviaWebhookHandler({ environment, store, notifications = 
       }
     }
     return response.json({ received: true, ...result });
-  };
+  });
 }

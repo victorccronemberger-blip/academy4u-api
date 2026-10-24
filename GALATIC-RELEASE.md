@@ -47,3 +47,56 @@ Depois dessas evidências, habilitar apenas `GALATIC_SALES_ENABLED=true`, reinic
 Fechar novas vendas e preservar webhooks/pós-venda. A migração aditiva `legacy_catalog_v1` importa somente uma base alvo vazia e sem pedidos; base existente é preservada e marcada. Ela não corrige automaticamente saldos antigos.
 
 **Não iniciar a versão antiga contra o banco migrado sem retirar o importador legado**: o boot antigo pode sobrescrever saldo. Preferir correção adiante na versão migrada; qualquer restauração de banco exige plano que preserve pedidos e eventos posteriores ao backup. Registrar SHA e evidência dos probes, sem credenciais ou dados de clientes.
+
+# Stage A: financial quiescence before payment-profile migration
+
+`GALATIC_FINANCIAL_OPERATIONS_ENABLED` is closed when absent. Only the exact
+literal string `true` opens the captured process gate. Keep it absent or `false`
+in production throughout the migration. The `true` path is transient legacy
+compatibility for controlled tests of this staging binary; it is not permission
+to reopen production or an alternative to the immutable profile migration.
+
+The pause blocks Galatic checkout pricing/creation/recovery, shipping quotes and
+provider operations, administrative payment and manual shipping actions,
+provider-driven public refresh/Pix, authenticated Asaas/Envia events, and worker
+financial selection/claims. Queued work remains intact. Invalid webhook
+authentication still returns 401; authenticated events receive retriable 503
+before any event receipt is stored. Local catalog/account/history reads and the
+notification mail outbox remain available. The default `/v1/checkout` alias uses
+the same Galatic router when Galatic is the default tenant. The generic Academy `/v1/public` and `/v1/art` aliases and ART worker are not
+mounted or initialized for a Galatic default tenant. Academy keeps its existing
+checkout, webhook, ART and LMS runtime behavior.
+
+An owner session may read `GET /v1/galatic/admin/runtime`. It reports only
+`releaseRevision`, `sourceFingerprint`, `bootId`, `startedAt`,
+`galaticFinancialOperationsEnabled`, and
+`galaticFinancialOperationsInFlight`. The same safe fields are logged on Galatic
+process startup. The counter covers asynchronous financial workflows and is
+released in `finally`, including failures and client disconnects. Nested
+workflows can contribute more than one counter unit. The reported boot and
+counter concern only the answering process. They cannot enumerate older
+processes, workers, alternate domains, or another host.
+
+`npm run build` writes ignored, nonpublic `.build/runtime.json`: revision from
+the actual build environment or Git checkout, plus a canonical SHA-256 of source
+and package files. Runtime startup does not require Git. Missing or invalid
+metadata is reported as null. A revision identifies a build checkout; the source
+fingerprint also identifies uncommitted source content. Neither metadata nor
+health success proves an old process has stopped.
+
+Fingerprint algorithm: traverse `src/` recursively with ordinal filename ordering
+within each directory, then `package.json` and `package-lock.json` in that order.
+Hash each relative path with `/` separators, a NUL byte, UTF-8 text normalized
+from CRLF to LF, and another NUL byte. The digest uses SHA-256. This makes the
+same source tree comparable across Windows and Linux builds.
+
+Before any destructive index/schema cutover, retain explicit lifecycle evidence
+that every prior generation and financial worker has stopped and no older
+request can apply a result. A completed deployment, successful health check or
+one boot with counter zero is insufficient. Check all serving domains/processes
+and separately running workers. If the hosting platform cannot provide this
+evidence, keep destructive cutover blocked and continue Stage B offline. This
+release performs no schema/index migration and does not bind historical orders
+to a new account/environment. Stage B must require the guard together with the
+persisted profile, verified generation, capability and payment evidence; a true
+environment flag must never restore a global-provider fallback there.

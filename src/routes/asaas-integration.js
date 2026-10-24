@@ -1,3 +1,4 @@
+import { closedGalaticFinancialGate } from "../services/galatic-financial-gate.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { normalizeAsaasWebhookStatus } from "../domain/payment-status.js";
 import { normalizeProviderInstallment } from "../services/installment-service.js";
@@ -24,8 +25,10 @@ export function createAsaasWebhookHandler({
   onAccessGranted,
   onAccessRevoked,
   referencePrefix = "academy",
+  financialGate = closedGalaticFinancialGate,
 }) {
-  return async function asaasWebhook(request, response) {
+  const isGalatic = environment.tenantId === "galatic" || referencePrefix === "galatic";
+  const handler = async function asaasWebhook(request, response) {
     if (!environment.asaasWebhookToken && !environment.asaasWebhookTokenHash) {
       response.status(503).json({ error: "webhook_not_configured" });
       return;
@@ -37,6 +40,8 @@ export function createAsaasWebhookHandler({
       response.status(401).json({ error: "invalid_webhook_token" });
       return;
     }
+
+    if (isGalatic && !financialGate.enabled) return financialGate.paused(response);
 
     const event = String(request.body?.event ?? "").trim().toUpperCase();
     const eventId = String(request.body?.id ?? "").trim();
@@ -93,7 +98,7 @@ export function createAsaasWebhookHandler({
         // recebimento imediatamente e processamos em background. O dedupe por
         // eventId/status + o lock por orderId em onAccessGranted impedem
         // reprocessamento e execução concorrente do mesmo pedido.
-        Promise.resolve()
+        const delivery = Promise.resolve()
           .then(() => onAccessGranted(persisted.id))
           .catch(async (error) => {
             console.error("Access grant pipeline failed after webhook ack", {
@@ -112,6 +117,7 @@ export function createAsaasWebhookHandler({
               console.error("Could not persist operational alert", { type: alertError?.name });
             }
           });
+        if (isGalatic) await delivery;
       }
       if (
         persisted?.id
@@ -141,4 +147,5 @@ export function createAsaasWebhookHandler({
       response.status(500).json({ error: "webhook_processing_failed" });
     }
   };
+  return isGalatic ? financialGate.track(handler) : handler;
 }

@@ -18,7 +18,7 @@ function fakeGalaticStore() {
 }
 
 function startApp(context, overrides, dependencies) {
-  const { app } = createApp({
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true",
     ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
     PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
     ...overrides,

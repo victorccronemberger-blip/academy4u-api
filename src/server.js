@@ -5,12 +5,13 @@ import { createGalaticPaymentMaintenance } from "./services/galatic-payment-main
 const { app, environment, ready, stores, tenants, asaasClient, contexts, galaticNotifications } = createApp();
 const galaticContext = contexts.get("galatic");
 const paymentMaintenance = galaticContext ? createGalaticPaymentMaintenance({
-  environment: galaticContext.environment, store: galaticContext.store, asaasClient, notifications: galaticNotifications,
+  environment: galaticContext.environment, store: galaticContext.store, asaasClient, notifications: galaticNotifications, financialGate: galaticContext.financialGate,
 }) : null;
 const server = app.listen(environment.port, environment.host, () => {
   console.log(`Payments API listening on ${environment.host}:${environment.port}`, {
     tenants: tenants.map((tenant) => tenant.id),
   });
+  if (galaticContext) console.log("Galatic financial process boot", galaticContext.financialGate.diagnostics());
   if (environment.asaasApiKey) {
     console.log("ACADEMY4U API provider credential loaded.", {
       environment: environment.asaasEnvironment,

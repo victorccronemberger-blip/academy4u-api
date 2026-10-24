@@ -55,7 +55,7 @@ async function refundHttp(context, { group = false, initial = null, providerResp
     if (providerError) throw providerError;
     return providerResponse;
   };
-  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
     { stores: { galatic: store }, asaasClient: { refundPayment: group ? async () => assert.fail("wrong scope") : mutate,
       refundInstallment: group ? mutate : async () => assert.fail("wrong scope") } });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -147,7 +147,7 @@ test("production label route verifies the injected production payment and report
     saveShipment: async (_orderId, value) => (stored = { order_id: orderId, tracking_code: value.trackingCode }),
     completeShipmentCreation: async () => {},
   });
-  const { app } = createApp({ ASAAS_ENABLED: "false", ASAAS_ENVIRONMENT: "production", PAYMENT_TENANTS: "galatic",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", ASAAS_ENVIRONMENT: "production", PAYMENT_TENANTS: "galatic",
     GALATIC_ENVIA_ENVIRONMENT: "production", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
     GALATIC_SHIPPING_NAME: "Synthetic", GALATIC_SHIPPING_EMAIL: "synthetic@example.test", GALATIC_SHIPPING_PHONE: "11999999999",
     GALATIC_SHIPPING_STREET: "Rua A", GALATIC_SHIPPING_NUMBER: "1", GALATIC_SHIPPING_DISTRICT: "Centro", GALATIC_SHIPPING_CITY: "Sao Paulo",
@@ -180,7 +180,7 @@ for (const installments of [2, 10]) test(`refunds the full ${installments}x grou
   });
   const asaasClient = { refundPayment: async () => assert.fail("a group must not refund only its first payment"),
     refundInstallment: async (...args) => { calls.push(args); throw Object.assign(new Error("synthetic_timeout"), { code: "asaas_timeout" }); } };
-  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: store }, asaasClient });
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: store }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
   await new Promise((resolve) => server.once("listening", resolve));
   const { base, cookie } = await login(server);
@@ -194,7 +194,7 @@ for (const installments of [2, 10]) test(`refunds the full ${installments}x grou
 
 test("protects the existing Galatic admin panel with an HttpOnly cookie session", async (context) => {
   const store = adminStore(await hashPassword("StrongAdminPassword!42"));
-  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
     GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", GALATIC_DATABASE_URL: "mysql://galatic:test@127.0.0.1/galatic" },
   { stores: { galatic: store } });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -234,7 +234,7 @@ test("paginates administrative product and content queries on the server", async
         pagination: { page: 2, per_page: 50, total: 76, pages: 2 } };
     },
   });
-  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
     GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", GALATIC_DATABASE_URL: "mysql://galatic:test@127.0.0.1/galatic" },
   { stores: { galatic: store } });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -265,7 +265,7 @@ test("requires the shared anti-bot proof before an administrative login", async 
       ? next()
       : response.status(400).json({ error: "bot_challenge_required" }),
   };
-  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
     GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: store }, botChallenge });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
   await new Promise((resolve) => server.once("listening", resolve));
@@ -300,7 +300,7 @@ test("reports technical configuration separately from sales and commercial catal
     const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
       adminListProducts: async () => products,
     });
-    const { app } = createApp({
+    const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true",
       ...baseEnvironment,
       ASAAS_ENVIRONMENT: asaasEnvironment,
       GALATIC_ENVIA_ENVIRONMENT: shippingEnvironment,
@@ -366,7 +366,7 @@ test("preserves unknown product costs and validates explicit costs before store 
     adminListProducts: async () => [{ ...current }],
     adminUpsertProduct: async (product) => { writes.push(product); return true; },
   });
-  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
     GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: store }, asaasClient: {}, enviaClient: {} });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
   await new Promise((resolve) => server.once("listening", resolve));
@@ -436,7 +436,7 @@ test("cancels an unpaid Asaas charge before releasing the Galatic order", async 
     getPayment: async (id) => { calls.push(["get", id]); return { status: "PENDING" }; },
     deletePayment: async (id) => { calls.push(["delete", id]); return { deleted: true }; },
   };
-  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
     GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", GALATIC_DATABASE_URL: "mysql://galatic:test@127.0.0.1/galatic" },
   { stores: { galatic: store }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -458,7 +458,7 @@ test("requires the full order number before requesting an Asaas refund", async (
     recordOperationalAlert: async () => {},
   });
   const asaasClient = { refundPayment: async () => { refunds += 1; } };
-  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
     GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", GALATIC_DATABASE_URL: "mysql://galatic:test@127.0.0.1/galatic" },
   { stores: { galatic: store }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());

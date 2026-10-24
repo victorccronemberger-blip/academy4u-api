@@ -1,3 +1,4 @@
+import { createGalaticFinancialGate, readGalaticBuildMetadata } from "./services/galatic-financial-gate.js";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
@@ -163,6 +164,8 @@ export function createApp(overrides = {}, dependencies = {}) {
   const galaticNotifications = dependencies.galaticNotifications ?? createGalaticNotifications(source);
   const botChallenge = dependencies.botChallenge ?? createBotChallenge({ enabled: environment.galaticBotProtectionEnabled });
   const contexts = new Map();
+  const galaticFinancialGate = createGalaticFinancialGate({ enabled: environment.galaticFinancialOperationsEnabled,
+    metadata: readGalaticBuildMetadata() });
 
   for (const tenant of tenants) {
     const tenantEnvironment = {
@@ -201,7 +204,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     const readiness = { status: "connecting", error: null };
     let catalog = null;
     const productResolver = (slug) => catalog?.getCheckoutProduct(slug) ?? getCheckoutProduct(slug);
-    const artClient = tenant.isDefault
+    const artClient = tenant.isDefault && tenant.id !== "galatic"
       ? dependencies.artClient ?? createArtClient(tenantEnvironment)
       : null;
     const artActivation = artClient
@@ -216,6 +219,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       environment: tenantEnvironment,
       store,
       installmentService,
+      ...(tenant.id === "galatic" ? { financialGate: galaticFinancialGate } : {}),
       readiness,
       productResolver,
       ...(artActivation ? { artActivation } : {}),
@@ -253,6 +257,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       onAccessGranted: context.onAccessGranted,
       onAccessRevoked: context.onAccessRevoked,
       referencePrefix: tenant.referencePrefix,
+      financialGate: context.financialGate,
     });
     contexts.set(tenant.id, context);
   }
@@ -376,21 +381,25 @@ export function createApp(overrides = {}, dependencies = {}) {
     const middleware = [tenantOrigin(context.tenant), tenantReadiness(context)];
     if (context.tenant.id === "galatic") {
       const fulfillment = createGalaticFulfillmentService({ environment: context.environment, store: context.store,
-        enviaClient, asaasClient, notifications: galaticNotifications });
-      app.use("/v1/galatic/checkout", ...middleware, createGalaticCheckoutRouter(express, {
+        enviaClient, asaasClient, notifications: galaticNotifications, financialGate: context.financialGate });
+      const galaticCheckoutRouter = createGalaticCheckoutRouter(express, {
         environment: context.environment,
         asaasClient,
         store: context.store,
         notifications: galaticNotifications,
         botChallenge,
-      }));
+        financialGate: context.financialGate,
+      });
+      context.checkoutRouter = galaticCheckoutRouter;
+      app.use("/v1/galatic/checkout", ...middleware, galaticCheckoutRouter);
       app.use("/v1/galatic/admin", ...middleware, createGalaticAdminRouter(express, {
-        environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment, asaasClient, botChallenge,
+        environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment, asaasClient, botChallenge, financialGate: context.financialGate,
       }));
       const shippingRouter = createGalaticShippingRouter(express, {
         environment: context.environment,
         store: context.store,
         enviaClient,
+        financialGate: context.financialGate,
         botChallenge,
       });
       app.use("/v1/galatic/quote", ...middleware, shippingRouter);
@@ -441,7 +450,7 @@ export function createApp(overrides = {}, dependencies = {}) {
 
   // Backwards compatibility for the existing Academy4u frontend.
   const defaultMiddleware = [tenantOrigin(defaultContext.tenant), tenantReadiness(defaultContext)];
-  app.use("/v1/checkout", ...defaultMiddleware, createCheckoutRouter(express, {
+  app.use("/v1/checkout", ...defaultMiddleware, defaultContext.tenant.id === "galatic" ? defaultContext.checkoutRouter : createCheckoutRouter(express, {
     environment: defaultContext.environment,
     asaasClient,
     installmentService: defaultContext.installmentService,
@@ -449,15 +458,17 @@ export function createApp(overrides = {}, dependencies = {}) {
     productResolver: defaultContext.productResolver,
     onAccessGranted: defaultContext.onAccessGranted,
   }));
-  app.use("/v1/public", ...defaultMiddleware, createPublicCommerceRouter(express, {
-    store: defaultContext.store,
-    productResolver: defaultContext.productResolver,
-  }));
-  app.use("/v1/art", ...defaultMiddleware, createArtAdminRouter(express, {
-    environment: defaultContext.environment,
-    store: defaultContext.store,
-    artRetryWorker: defaultContext.artRetryWorker ?? null,
-  }));
+  if (defaultContext.tenant.id !== "galatic") {
+    app.use("/v1/public", ...defaultMiddleware, createPublicCommerceRouter(express, {
+      store: defaultContext.store,
+      productResolver: defaultContext.productResolver,
+    }));
+    app.use("/v1/art", ...defaultMiddleware, createArtAdminRouter(express, {
+      environment: defaultContext.environment,
+      store: defaultContext.store,
+      artRetryWorker: defaultContext.artRetryWorker ?? null,
+    }));
+  }
 
   // O webhook é a única rota exposta à internet sem CORS/origem. Sem limite,
   // um flood de POSTs (mesmo autenticados) martelaria o banco na deduplicação.
@@ -473,7 +484,7 @@ export function createApp(overrides = {}, dependencies = {}) {
   const galaticContext = contexts.get("galatic");
   if (galaticContext) app.post("/v1/webhooks/envia", webhookLimiter,
     createEnviaWebhookHandler({ environment: galaticContext.environment, store: galaticContext.store,
-      notifications: galaticNotifications }));
+      notifications: galaticNotifications, financialGate: galaticContext.financialGate }));
 
   app.use((_request, response) => {
     response.status(404).json({

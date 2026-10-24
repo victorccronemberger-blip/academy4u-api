@@ -36,7 +36,36 @@ async function assertNoUnsafeCode(directory) {
 }
 await assertNoUnsafeCode(fileURLToPath(new URL("../src", import.meta.url)));
 
+// Nonpublic deployment metadata is generated from the actual checkout. Runtime
+// startup remains independent of Git and reports null if metadata is unavailable.
+const root = fileURLToPath(new URL("..", import.meta.url));
+const sourceHash = createHash("sha256");
+async function fingerprint(directory) {
+  for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) await fingerprint(target);
+    else {
+      sourceHash.update(path.relative(root, target).replaceAll("\\", "/"));
+      sourceHash.update("\0"); sourceHash.update((await readFile(target, "utf8")).replaceAll("\r\n", "\n")); sourceHash.update("\0");
+    }
+  }
+}
+await fingerprint(path.join(root, "src"));
+for (const file of ["package.json", "package-lock.json"]) {
+  sourceHash.update(file); sourceHash.update("\0"); sourceHash.update((await readFile(path.join(root, file), "utf8")).replaceAll("\r\n", "\n")); sourceHash.update("\0");
+}
+let releaseRevision = process.env.GITHUB_SHA || process.env.RELEASE_REVISION || null;
+if (!/^[a-f0-9]{40}$/.test(releaseRevision ?? "")) {
+  try { releaseRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+  catch { releaseRevision = null; }
+}
+if (!/^[a-f0-9]{40}$/.test(releaseRevision ?? "")) releaseRevision = null;
+await mkdir(path.join(root, ".build"), { recursive: true });
+await writeFile(path.join(root, ".build/runtime.json"), JSON.stringify({ releaseRevision, sourceFingerprint: sourceHash.digest("hex") }) + "\n");
+
 console.log("ACADEMY4U API source validated.");
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

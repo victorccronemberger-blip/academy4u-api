@@ -1,3 +1,4 @@
+import { createGalaticFinancialGate } from "../src/services/galatic-financial-gate.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
@@ -192,7 +193,7 @@ test("Galatic transactions against local disposable MySQL", { skip: !databaseUrl
     await db.query("UPDATE galatic_checkout_attempts SET reconcile_after=UTC_TIMESTAMP(3) WHERE idempotency_key=?", [key]);
     const batches = await Promise.all([store.claimPaymentReconciliations(), replica.claimPaymentReconciliations()]);
     assert.equal(batches.flat().filter((item) => item.key === key).length, 1);
-    const recover = createGalaticPaymentRecovery({ store: restarted, asaasClient: { findPaymentsByExternalReference: async () => ({ data: [] }) } });
+    const recover = createGalaticPaymentRecovery({ financialGate: createGalaticFinancialGate({ enabled: true }), store: restarted, asaasClient: { findPaymentsByExternalReference: async () => ({ data: [] }) } });
     await assert.rejects(() => recover({ key }), { code: "payment_not_yet_found" });
     assert.equal((await restarted.getCheckoutRecovery({ key })).state, "uncertain");
     const evidence = { id: "pay_synthetic_paid", customer: details.customerId, billingType: "PIX", value: paidOrder.totalCents / 100,
@@ -289,7 +290,7 @@ test("Galatic transactions against local disposable MySQL", { skip: !databaseUrl
     assert.deepEqual(await restarted.adminRefundOperation(order.id), expected);
     assert.deepEqual((await restarted.adminOrder(order.id)).refund_operation, expected);
     assert.equal((await restarted.claimRefund(order.id, "synthetic-admin")).claimed, false);
-    const maintenance = createGalaticPaymentMaintenance({
+    const maintenance = createGalaticPaymentMaintenance({ financialGate: createGalaticFinancialGate({ enabled: true }),
       environment: { galaticPaymentMaintenanceEnabled: true, galaticPixReservationMinutes: 60, galaticCardReservationMinutes: 4320 },
       store: { ...restarted, claimPaymentReconciliations: async () => [], listExpiredPaymentReservations: async () => [],
         claimRefundReconciliations: async () => (await restarted.claimRefundReconciliations()).filter((refund) => refund.id === order.id) },
@@ -331,7 +332,7 @@ test("Galatic transactions against local disposable MySQL", { skip: !databaseUrl
       "sendNewsletterVerification", "sendNewsletterConfirmed", "sendNewsletterUnsubscribed"];
     const notifications = { ready: true, ...Object.fromEntries(methods.map((method) =>
       [method, async (value) => { messages.push({ method, ...value }); }])) };
-    const runtime = createApp({ NODE_ENV: "test", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
+    const runtime = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", NODE_ENV: "test", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
       GALATIC_SALES_ENABLED: "false", GALATIC_BOT_PROTECTION_ENABLED: "false" }, {
       stores: { galatic: newStore() }, galaticNotifications: notifications,
       // No payment, shipping or SMTP client can make an external request from these journeys.
@@ -473,7 +474,7 @@ test("Galatic transactions against local disposable MySQL", { skip: !databaseUrl
   await t.test("zero active products keep preopening status and post-sale routes available", async () => {
     await db.query("UPDATE galatic_products SET active=0");
     const inactiveStore = newStore(); await inactiveStore.ensureSchema();
-    const runtime = createApp({ PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", GALATIC_SALES_ENABLED: "false" }, { stores: { galatic: inactiveStore } });
+    const runtime = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", GALATIC_SALES_ENABLED: "false" }, { stores: { galatic: inactiveStore } });
     await runtime.ready;
     const server = runtime.app.listen(0, "127.0.0.1");
     try {

@@ -1,3 +1,4 @@
+import { createGalaticFinancialGate } from "../src/services/galatic-financial-gate.js";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -34,7 +35,7 @@ function productionLabelFixture({ installments = 1, method = "pix", legacy = fal
   const environment = { galaticEnviaEnvironment: "production", asaasEnvironment: "production", asaasApiOrigin: "https://api.asaas.com/v3",
     galaticShippingOrigin: { name: "Galatic", street: "Rua A", number: "1", district: "Centro", city: "Sao Paulo", state: "SP", postalCode: "01001000" } };
   Object.assign(fixture, { store, asaasClient, enviaClient, environment,
-    service: () => createGalaticFulfillmentService({ environment, store, asaasClient: fixture.asaasClient, enviaClient }) });
+    service: () => createGalaticFulfillmentService({ financialGate: createGalaticFinancialGate({ enabled: true }), environment, store, asaasClient: fixture.asaasClient, enviaClient }) });
   return fixture;
 }
 
@@ -182,7 +183,7 @@ test("creates one paid-order label and reuses it on retry", async () => {
     trackUrl: "https://tracking.envia.com/BR123", totalPrice: 25, currency: "BRL" }] }; } };
   const environment = { galaticShippingOrigin: { name: "Galatic", email: "loja@example.com", phone: "11999999999", street: "Rua A",
     number: "1", district: "Centro", city: "Sao Paulo", state: "SP", postalCode: "01001000", taxId: "11222333000181" } };
-  const service = createGalaticFulfillmentService({ environment, store, enviaClient });
+  const service = createGalaticFulfillmentService({ financialGate: createGalaticFinancialGate({ enabled: true }), environment, store, enviaClient });
   assert.equal((await service.createLabel("order-1")).created, true);
   assert.equal((await service.createLabel("order-1")).created, false);
   assert.equal(providerCalls.length, 1);
@@ -209,7 +210,7 @@ test("serializes concurrent label requests before calling Envia", async () => {
     return { data: [{ shipmentId: "shipment-1", trackingNumber: "BR-RACE" }] }; } };
   const environment = { galaticShippingOrigin: { name: "Galatic", email: "loja@example.com", phone: "11999999999",
     street: "Rua A", number: "1", district: "Centro", city: "Sao Paulo", state: "SP", postalCode: "01001000", taxId: "11222333000181" } };
-  const service = createGalaticFulfillmentService({ environment, store, enviaClient });
+  const service = createGalaticFulfillmentService({ financialGate: createGalaticFinancialGate({ enabled: true }), environment, store, enviaClient });
   const first = service.createLabel(context.id);
   await new Promise((resolve) => setImmediate(resolve));
   await assert.rejects(() => service.createLabel(context.id), (error) => error.code === "shipping_in_progress");
@@ -230,7 +231,7 @@ test("blocks blind retry when Envia result is uncertain", async () => {
     recordOperationalAlert: async (value) => alerts.push(value) };
   const enviaClient = { ready: true, generateLabel: async () => { calls += 1; throw Object.assign(new Error("timeout"), { code: "timeout" }); } };
   const environment = { galaticShippingOrigin: { name: "Galatic", street: "Rua", number: "1", district: "Centro", city: "Sao Paulo", state: "SP", postalCode: "01001000" } };
-  const service = createGalaticFulfillmentService({ environment, store, enviaClient });
+  const service = createGalaticFulfillmentService({ financialGate: createGalaticFinancialGate({ enabled: true }), environment, store, enviaClient });
   await assert.rejects(() => service.createLabel("order-uncertain"), (error) => error.code === "timeout");
   await assert.rejects(() => service.createLabel("order-uncertain"), (error) => error.code === "shipping_needs_reconciliation");
   assert.equal(calls, 1);
@@ -244,7 +245,7 @@ test("authenticates and deduplicates Envia tracking webhooks", async () => {
   const body = { type: event, data: { tracking_number: "BR123", status: "delivered", status_description: "Entregue" } };
   const rawBody = JSON.stringify(body); const signature = crypto.createHmac("sha256", secret).update(`${timestamp}.${event}.${rawBody}`).digest("hex");
   const calls = []; const notifications = [];
-  const handler = createEnviaWebhookHandler({ environment: { galaticEnviaWebhookSecret: secret },
+  const handler = createEnviaWebhookHandler({ financialGate: createGalaticFinancialGate({ enabled: true }), environment: { galaticEnviaWebhookSecret: secret },
     store: { updateShipmentFromEvent: async (value) => { calls.push(value); return { updated: true, orderId: "order-1" }; },
       getOrderNotification: async () => ({ orderId: "order-1", email: "cliente@example.com", name: "Cliente" }),
       claimNotification: async () => true, releaseNotification: async () => {} },
