@@ -319,9 +319,11 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
     try { const result = await fulfillment.createLabel(request.params.id); return response.status(result.created ? 201 : 200).json(result); }
     catch (error) {
-      const status = error?.code === "order_not_found" ? 404 : ["order_not_paid", "shipping_service_missing", "shipping_in_progress", "shipping_needs_reconciliation"].includes(error?.code) ? 409
+      const status = error?.code === "order_not_found" ? 404 : ["order_not_paid", "shipping_service_missing", "shipping_in_progress", "shipping_needs_reconciliation", "shipping_payment_unverified"].includes(error?.code) ? 409
         : error?.code === "shipping_unavailable" ? 503 : 502;
-      return response.status(status).json({ error: error?.code ?? "label_generation_failed", message: "Não foi possível gerar a etiqueta de envio." });
+      return response.status(status).json({ error: error?.code ?? "label_generation_failed", message: error?.code === "shipping_payment_unverified"
+        ? "O pagamento integral deste pedido não pôde ser confirmado na conta Asaas de produção. A etiqueta não foi emitida."
+        : "Não foi possível gerar a etiqueta de envio." });
     }
   });
   router.post("/orders/:id/shipping/refresh", allowBodyFields([]), async (request, response) => {

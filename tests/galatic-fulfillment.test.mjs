@@ -5,6 +5,154 @@ import { getEnvironment } from "../src/config/environment.js";
 import { createEnviaWebhookHandler } from "../src/routes/envia-webhook.js";
 import { createGalaticFulfillmentService } from "../src/services/galatic-fulfillment.js";
 
+function productionLabelFixture({ installments = 1, method = "pix", legacy = false } = {}) {
+  const trace = []; let stored = null; let operation = null;
+  const order = { id: "20d42dfd-9bf6-44f3-932b-625b475e324a", payment_status: "paid", payment_provider: "asaas",
+    payment_provider_order_id: "pay_synthetic_1", payment_provider_group_id: installments > 1 ? "ins_synthetic" : null,
+    payment_method: method, installments, total_cents: 12000, buyer_name: "Synthetic Buyer", buyer_email: "buyer@example.test",
+    buyer_phone: "11999999999", buyer_document: "52998224725", service_code: "correios:pac",
+    shipping_address: { street: "Rua B", number: "2", district: "Centro", city: "Sao Paulo", state: "SP", postalCode: "01001000" },
+    items: [{ title: "Jogo", quantity: 1, unit_amount_cents: 12000, weight_grams: 1000, length_cm: 30, width_cm: 20, height_cm: 10 }] };
+  const payments = Array.from({ length: installments }, (_, index) => ({ id: `pay_synthetic_${index + 1}`,
+    customer: "cus_synthetic", billingType: method === "pix" ? "PIX" : "CREDIT_CARD", value: 120 / installments,
+    externalReference: `galatic:${order.id}`, status: "CONFIRMED",
+    ...(installments > 1 ? { installment: "ins_synthetic", installmentNumber: index + 1 } : {}) }));
+  const fixture = { order, payments, trace, result: { data: payments, hasMore: false, totalCount: installments },
+    recovery: legacy ? null : { state: "completed", providerCustomerId: "cus_synthetic", pricing: { totalCents: 12000 },
+      order: { id: order.id, method, installments, totalCents: 12000 } }, existing: null };
+  const store = { shipmentForOrder: async () => fixture.existing || stored,
+    shipmentCreationContext: async () => order,
+    getCheckoutRecovery: async ({ orderId }) => { assert.equal(orderId, order.id); trace.push("checkout-read"); return fixture.recovery; },
+    claimShipmentCreation: async () => { trace.push("claim"); return operation ? { claimed: false, status: operation }
+      : ((operation = "in_progress"), { claimed: true }); },
+    completeShipmentCreation: async () => { trace.push("complete"); operation = "completed"; },
+    markShipmentCreationUncertain: async () => { trace.push("uncertain"); operation = "needs_reconciliation"; },
+    saveShipment: async (_orderId, value) => (trace.push("save"), stored = { order_id: order.id, tracking_code: value.trackingCode }) };
+  const asaasClient = { getPayment: async (id) => { trace.push("payment-read"); assert.equal(id, order.payment_provider_order_id); return fixture.linked ?? payments[0]; },
+    findPaymentsByExternalReference: async (reference) => { trace.push("group-read"); assert.equal(reference, `galatic:${order.id}`); return fixture.result; } };
+  const enviaClient = { ready: true, generateLabel: async () => { trace.push("envia"); return { data: [{ trackingNumber: "BR-SYNTHETIC" }] }; } };
+  const environment = { galaticEnviaEnvironment: "production", asaasEnvironment: "production", asaasApiOrigin: "https://api.asaas.com/v3",
+    galaticShippingOrigin: { name: "Galatic", street: "Rua A", number: "1", district: "Centro", city: "Sao Paulo", state: "SP", postalCode: "01001000" } };
+  Object.assign(fixture, { store, asaasClient, enviaClient, environment,
+    service: () => createGalaticFulfillmentService({ environment, store, asaasClient: fixture.asaasClient, enviaClient }) });
+  return fixture;
+}
+
+async function assertPaymentBlocked(fixture) {
+  const before = structuredClone(fixture.order);
+  await assert.rejects(() => fixture.service().createLabel(fixture.order.id), { code: "shipping_payment_unverified" });
+  assert.ok(!fixture.trace.some((event) => ["claim", "envia", "save", "complete", "uncertain"].includes(event)), fixture.trace.join(", "));
+  assert.deepEqual(fixture.order, before, "verification cannot flip local financial status");
+}
+
+test("locally paid orders missing in production cannot acquire an operation or emit a label", async () => {
+  const fixture = productionLabelFixture({ legacy: true });
+  fixture.asaasClient.getPayment = async () => { fixture.trace.push("production-404"); throw Object.assign(new Error("not_found"), { status: 404 }); };
+  await assertPaymentBlocked(fixture);
+  assert.deepEqual(fixture.trace, ["checkout-read", "production-404"]);
+});
+
+for (const method of ["pix", "credit_card"]) test(`current matching production ${method} payment authorizes one label and reuses it`, async () => {
+  const fixture = productionLabelFixture({ method }); const service = fixture.service();
+  assert.equal((await service.createLabel(fixture.order.id)).created, true);
+  assert.equal((await service.createLabel(fixture.order.id)).created, false);
+  assert.deepEqual(fixture.trace, ["checkout-read", "payment-read", "claim", "envia", "save", "complete"]);
+});
+
+test("legacy binding absence requires positive production ID, reference, method and total without writing a customer mapping", async () => {
+  for (const recovery of [null, { state: "completed", order: { id: "20d42dfd-9bf6-44f3-932b-625b475e324a", method: "pix", installments: 1, totalCents: 12000 }, pricing: null, providerCustomerId: null }]) {
+    const fixture = productionLabelFixture({ legacy: true }); fixture.recovery = recovery;
+    assert.equal((await fixture.service().createLabel(fixture.order.id)).created, true);
+    assert.deepEqual(fixture.recovery, recovery);
+  }
+});
+
+test("stored labels are reused even when production payment evidence and providers are unavailable", async () => {
+  const fixture = productionLabelFixture(); fixture.existing = { order_id: fixture.order.id, tracking_code: "EXISTING" };
+  fixture.asaasClient = null; fixture.enviaClient.ready = false; fixture.environment.galaticShippingOrigin = null;
+  assert.equal((await fixture.service().createLabel(fixture.order.id)).created, false);
+  assert.deepEqual(fixture.trace, []);
+});
+
+const invalidPaymentCases = {
+  deleted: (f) => { f.payments[0].deleted = true; },
+  refunded: (f) => { f.payments[0].status = "REFUNDED"; },
+  pending: (f) => { f.payments[0].status = "PENDING"; },
+  chargeback: (f) => { f.payments[0].status = "CHARGEBACK_REQUESTED"; },
+  "partial refund": (f) => { f.payments[0].refundedValue = 1; },
+  "refund pending": (f) => { f.payments[0].refunds = [{ status: "PENDING", value: 1 }]; },
+  "wrong payment ID": (f) => { f.payments[0].id = "pay_other"; },
+  "wrong external reference": (f) => { f.payments[0].externalReference = "galatic:another-order"; },
+  "wrong method": (f) => { f.payments[0].billingType = "CREDIT_CARD"; },
+  "wrong value": (f) => { f.payments[0].value = 1; },
+  "wrong stored customer": (f) => { f.payments[0].customer = "cus_other"; },
+  "missing current customer": (f) => { delete f.payments[0].customer; },
+  "missing linked payment": (f) => { f.order.payment_provider_order_id = null; },
+  "missing payment method": (f) => { f.order.payment_method = null; },
+  "unknown payment provider": (f) => { f.order.payment_provider = "other"; },
+  "missing stored binding on priced checkout": (f) => { f.recovery.providerCustomerId = null; },
+  "conflicting stored pricing": (f) => { f.recovery.pricing.totalCents = 100; },
+  "unexpected group for single payment": (f) => { f.payments[0].installment = "ins_other"; },
+  "unavailable provider": (f) => { f.asaasClient = null; },
+  timeout: (f) => { f.asaasClient.getPayment = async () => { throw Object.assign(new Error("timeout"), { code: "asaas_timeout" }); }; },
+  "sandbox provider configuration": (f) => { f.environment.asaasEnvironment = "sandbox"; },
+  "sandbox provider origin": (f) => { f.environment.asaasApiOrigin = "https://api-sandbox.asaas.com/v3"; },
+};
+for (const [name, invalidate] of Object.entries(invalidPaymentCases)) test(`production label blocks ${name} before claim`, async () => {
+  const fixture = productionLabelFixture(); invalidate(fixture); await assertPaymentBlocked(fixture);
+  if (name.startsWith("sandbox provider")) assert.deepEqual(fixture.trace, []);
+});
+
+for (const installments of [2, 10]) test(`production ${installments}x card requires the complete currently paid group before claim`, async () => {
+  const fixture = productionLabelFixture({ installments, method: "credit_card" });
+  assert.equal((await fixture.service().createLabel(fixture.order.id)).created, true);
+  assert.deepEqual(fixture.trace, ["checkout-read", "payment-read", "group-read", "claim", "envia", "save", "complete"]);
+});
+
+const invalidGroupCases = {
+  "only first installment paid": (f) => { for (const payment of f.payments.slice(1)) payment.status = "PENDING"; },
+  "missing installment": (f) => { f.result.data = f.payments.slice(0, -1); },
+  "truncated result": (f) => { f.result.hasMore = true; },
+  "unknown pagination completeness": (f) => { delete f.result.hasMore; },
+  "conflicting total count": (f) => { f.result.totalCount += 1; },
+  "duplicate IDs": (f) => { f.payments[1].id = f.payments[0].id; },
+  "wrong group": (f) => { f.payments[1].installment = "ins_other"; },
+  "wrong stored group": (f) => { f.order.payment_provider_group_id = "ins_other"; },
+  "linked payment absent from group": (f) => { f.linked = { ...f.payments[0] }; f.payments[0].id = "pay_another"; },
+  "foreign customer": (f) => { f.payments[1].customer = "cus_other"; },
+  "foreign reference": (f) => { f.payments[1].externalReference = "galatic:other"; },
+  "wrong method": (f) => { f.payments[1].billingType = "PIX"; },
+  "wrong aggregate total despite plausible installment values": (f) => { for (const payment of f.payments) payment.value += 0.01; },
+  "deleted installment": (f) => { f.payments[1].deleted = true; },
+  "refunded installment": (f) => { f.payments[1].status = "REFUNDED"; },
+  "null payment entry": (f) => { f.result.data[1] = null; },
+  "group provider unavailable": (f) => { f.asaasClient.findPaymentsByExternalReference = async () => { throw new Error("unavailable"); }; },
+};
+for (const [name, invalidate] of Object.entries(invalidGroupCases)) test(`production installment label blocks ${name} before claim`, async () => {
+  const fixture = productionLabelFixture({ installments: 10, method: "credit_card" }); invalidate(fixture); await assertPaymentBlocked(fixture);
+});
+
+test("legacy installment evidence still requires one current customer and the complete group", async () => {
+  const fixture = productionLabelFixture({ installments: 10, method: "credit_card", legacy: true });
+  fixture.order.payment_provider_group_id = null;
+  assert.equal((await fixture.service().createLabel(fixture.order.id)).created, true);
+  const foreign = productionLabelFixture({ installments: 10, method: "credit_card", legacy: true });
+  foreign.payments[1].customer = "cus_other"; await assertPaymentBlocked(foreign);
+});
+
+test("production verification finishes before the existing claim serializes concurrent label requests", async () => {
+  const fixture = productionLabelFixture({ installments: 10, method: "credit_card" });
+  let release; const gate = new Promise((resolve) => { release = resolve; });
+  fixture.enviaClient.generateLabel = async () => { fixture.trace.push("envia"); await gate; return { data: [{ trackingNumber: "BR-SYNTHETIC" }] }; };
+  const service = fixture.service(); const first = service.createLabel(fixture.order.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(() => service.createLabel(fixture.order.id), { code: "shipping_in_progress" });
+  assert.deepEqual(fixture.trace, ["checkout-read", "payment-read", "group-read", "claim", "envia",
+    "checkout-read", "payment-read", "group-read", "claim"]);
+  release(); assert.equal((await first).created, true);
+  assert.equal(fixture.trace.filter((event) => event === "envia").length, 1);
+});
+
 test("keeps Envia in sandbox unless production is explicitly selected", () => {
   const sandbox = getEnvironment({ GALATIC_ENVIA_API_KEY: "test" });
   assert.equal(sandbox.galaticEnviaEnvironment, "sandbox");

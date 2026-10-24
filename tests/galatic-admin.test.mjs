@@ -29,6 +29,42 @@ async function login(server, password = "StrongAdminPassword!42") {
 
 const authenticatedHeaders = (cookie, origin = "https://galatic.com.br", additions = {}) => ({ origin, cookie, ...additions });
 
+test("production label route verifies the injected production payment and reports an unverified order as 409", async (context) => {
+  const orderId = "20d42dfd-9bf6-44f3-932b-625b475e324a"; let available = false; let claims = 0; let labels = 0; let stored = null;
+  const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
+    shipmentForOrder: async () => stored,
+    shipmentCreationContext: async () => ({ id: orderId, payment_status: "paid", payment_provider: "asaas",
+      payment_provider_order_id: "pay_synthetic_production", payment_provider_group_id: null, payment_method: "pix", installments: 1, total_cents: 12000,
+      service_code: "correios:pac", shipping_address: { street: "Rua B", number: "2", district: "Centro", city: "Sao Paulo", state: "SP", postalCode: "01001000" },
+      items: [{ title: "Synthetic", quantity: 1, unit_amount_cents: 12000, weight_grams: 1000, length_cm: 30, width_cm: 20, height_cm: 10 }] }),
+    getCheckoutRecovery: async () => null,
+    claimShipmentCreation: async () => { claims += 1; return { claimed: true }; },
+    saveShipment: async (_orderId, value) => (stored = { order_id: orderId, tracking_code: value.trackingCode }),
+    completeShipmentCreation: async () => {},
+  });
+  const { app } = createApp({ ASAAS_ENABLED: "false", ASAAS_ENVIRONMENT: "production", PAYMENT_TENANTS: "galatic",
+    GALATIC_ENVIA_ENVIRONMENT: "production", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
+    GALATIC_SHIPPING_NAME: "Synthetic", GALATIC_SHIPPING_EMAIL: "synthetic@example.test", GALATIC_SHIPPING_PHONE: "11999999999",
+    GALATIC_SHIPPING_STREET: "Rua A", GALATIC_SHIPPING_NUMBER: "1", GALATIC_SHIPPING_DISTRICT: "Centro", GALATIC_SHIPPING_CITY: "Sao Paulo",
+    GALATIC_SHIPPING_STATE: "SP", GALATIC_SHIPPING_POSTAL_CODE: "01001000", GALATIC_SHIPPING_TAX_ID: "11222333000181" },
+  { stores: { galatic: store }, asaasClient: { getPayment: async () => {
+    if (!available) throw Object.assign(new Error("synthetic_not_found"), { status: 404 });
+    return { id: "pay_synthetic_production", externalReference: `galatic:${orderId}`, customer: "cus_synthetic", billingType: "PIX", value: 120, status: "CONFIRMED" };
+  } }, enviaClient: { ready: true, generateLabel: async () => { labels += 1; return { data: [{ trackingNumber: "BR-SYNTHETIC" }] }; } } });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { base, cookie } = await login(server);
+  const post = () => fetch(`${base}/orders/${orderId}/shipping/label`, { method: "POST",
+    headers: authenticatedHeaders(cookie, "https://galatic.com.br", { "content-type": "application/json" }), body: "{}" });
+  const blocked = await post(); assert.equal(blocked.status, 409);
+  const body = await blocked.json(); assert.equal(body.error, "shipping_payment_unverified");
+  assert.match(body.message, /conta Asaas de produção/); assert.equal(claims, 0); assert.equal(labels, 0);
+  available = true;
+  assert.equal((await post()).status, 201); assert.equal(claims, 1); assert.equal(labels, 1);
+  available = false;
+  assert.equal((await post()).status, 200); assert.equal(claims, 1); assert.equal(labels, 1);
+});
+
 for (const installments of [2, 10]) test(`refunds the full ${installments}x group once and never resends an uncertain refund`, async (context) => {
   const calls = []; let state = null;
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
