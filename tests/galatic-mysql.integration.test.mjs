@@ -5,6 +5,7 @@ import mysql from "mysql2/promise";
 import { createGalaticMySqlStore } from "../src/store/galatic-mysql-store.js";
 import { createGalaticPaymentRecovery } from "../src/services/galatic-payment-recovery.js";
 import { createApp } from "../src/application.js";
+import { tokenHash } from "../src/domain/password.js";
 
 const databaseUrl = process.env.MYSQL_TEST_URL;
 const logistics = { weight_grams: 1000, length_cm: 30, width_cm: 20, height_cm: 10 };
@@ -266,6 +267,153 @@ test("Galatic transactions against local disposable MySQL", { skip: !databaseUrl
     assert.equal(operation.state, "completed");
     const history = await store.adminRefundHistory(order.id);
     assert.equal(history.length, 2); assert.equal(history[0].state, "rejected"); assert.equal(history[1].state, "completed");
+  });
+
+  async function accountHttp(context) {
+    // Each journey gets fresh limiter windows inside this already guarded, disposable schema.
+    await db.query("DELETE FROM galatic_rate_limits WHERE scope IN ('galatic-auth-ip','galatic-auth-identity','galatic-public-write')");
+    const messages = [];
+    const methods = ["sendEmailVerification", "sendWelcome", "sendPasswordReset", "sendPasswordChanged",
+      "sendNewsletterVerification", "sendNewsletterConfirmed", "sendNewsletterUnsubscribed"];
+    const notifications = { ready: true, ...Object.fromEntries(methods.map((method) =>
+      [method, async (value) => { messages.push({ method, ...value }); }])) };
+    const runtime = createApp({ NODE_ENV: "test", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
+      GALATIC_SALES_ENABLED: "false", GALATIC_BOT_PROTECTION_ENABLED: "false" }, {
+      stores: { galatic: newStore() }, galaticNotifications: notifications,
+      // No payment, shipping or SMTP client can make an external request from these journeys.
+      asaasClient: {}, enviaClient: {},
+    });
+    await runtime.ready;
+    const server = runtime.app.listen(0, "127.0.0.1");
+    context.after(() => new Promise((resolve) => server.close(resolve)));
+    await new Promise((resolve) => server.once("listening", resolve));
+    const base = `http://127.0.0.1:${server.address().port}/v1/galatic`;
+    async function request(path, body, cookie) {
+      const response = await fetch(`${base}${path}`, { method: body === undefined ? "GET" : "POST",
+        headers: { origin: "https://galatic.com.br", "content-type": "application/json", ...(cookie ? { cookie } : {}) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+      return { status: response.status, body: await response.json(), cookie: response.headers.get("set-cookie") };
+    }
+    async function register() {
+      const email = `account-${randomUUID()}@example.test`; const password = "SyntheticOriginal123";
+      const response = await request("/auth/register", { first_name: "Synthetic", last_name: "Account", email, password,
+        marketing_consent: false, terms_accepted: true, terms_version: "site-2026-10" });
+      assert.equal(response.status, 201);
+      assert.equal(response.body.customer.email_verified, false);
+      assert.equal(response.body.access_token, undefined);
+      assert.equal(response.body.customer.password_hash, undefined);
+      assert.ok(/^__Host-galatic_session=/.test(response.cookie), "Registration must issue the customer cookie");
+      for (const attribute of ["HttpOnly", "Secure", "Path=/", "SameSite=None", "Partitioned"]) {
+        assert.ok(response.cookie.includes(attribute), `Session cookie requires ${attribute}`);
+      }
+      assert.ok(!response.cookie.includes("Max-Age="), "Registration creates a browser-session cookie");
+      const verification = messages.find((message) => message.method === "sendEmailVerification" && message.customer.id === response.body.customer.id);
+      assert.ok(verification?.token, "The locally captured verification message supplies the customer link");
+      return { email, password, id: response.body.customer.id, cookie: response.cookie.split(";", 1)[0], token: verification.token };
+    }
+    async function rejectsToken(path, token, password = "SyntheticRejected123") {
+      const response = await request(path, { token, ...(path === "/auth/reset-password" ? { password } : {}) });
+      assert.equal(response.status, 400); assert.equal(response.body.error, "invalid_token");
+    }
+    return { messages, request, register, rejectsToken };
+  }
+
+  await t.test("HTTP account journey confirms email once, resets password once and revokes every earlier session", async (context) => {
+    const { messages, request, register, rejectsToken } = await accountHttp(context);
+    const account = await register();
+    assert.equal((await request("/auth/me")).status, 401);
+    const initial = await request("/auth/me", undefined, account.cookie);
+    assert.equal(initial.status, 200); assert.equal(initial.body.customer.id, account.id);
+    assert.equal(initial.body.customer.email_verified, false);
+    assert.equal((await request("/auth/verify-email", { token: account.token })).status, 200);
+    assert.equal((await request("/auth/me", undefined, account.cookie)).body.customer.email_verified, true);
+    await rejectsToken("/auth/verify-email", account.token);
+    assert.equal(messages.filter((message) => message.method === "sendWelcome").length, 1);
+
+    const secondSession = await request("/auth/login", { email: account.email, password: account.password, remember: true });
+    assert.equal(secondSession.status, 200);
+    assert.ok(secondSession.cookie.includes("Max-Age=2592000"));
+    const secondCookie = secondSession.cookie.split(";", 1)[0];
+    assert.equal((await request("/auth/me", undefined, secondCookie)).status, 200);
+    const forgotten = await request("/auth/forgot-password", { email: account.email });
+    assert.equal(forgotten.status, 200);
+    const reset = messages.find((message) => message.method === "sendPasswordReset");
+    assert.ok(reset?.token);
+    const newPassword = "SyntheticReplacement123";
+    assert.equal((await request("/auth/reset-password", { token: reset.token, password: newPassword })).status, 200);
+    for (const cookie of [account.cookie, secondCookie]) assert.equal((await request("/auth/me", undefined, cookie)).status, 401);
+    const oldLogin = await request("/auth/login", { email: account.email, password: account.password });
+    assert.equal(oldLogin.status, 401); assert.equal(oldLogin.body.error, "invalid_credentials");
+    await rejectsToken("/auth/reset-password", reset.token);
+    const newLogin = await request("/auth/login", { email: account.email, password: newPassword });
+    assert.equal(newLogin.status, 200);
+    const current = await request("/auth/me", undefined, newLogin.cookie.split(";", 1)[0]);
+    assert.equal(current.status, 200); assert.equal(current.body.customer.id, account.id);
+    assert.equal(current.body.customer.email_verified, true);
+    assert.equal(current.body.customer.password_hash, undefined);
+    assert.equal(messages.filter((message) => message.method === "sendPasswordChanged").length, 1);
+  });
+
+  await t.test("HTTP invalid and crossed-purpose links leave verification, password and existing session unchanged", async (context) => {
+    const { messages, request, register, rejectsToken } = await accountHttp(context);
+    const account = await register();
+    await rejectsToken("/auth/verify-email", "synthetic-invalid-link");
+    await rejectsToken("/auth/reset-password", "synthetic-invalid-link");
+    await rejectsToken("/auth/reset-password", account.token);
+    assert.equal((await request("/auth/forgot-password", { email: account.email })).status, 200);
+    const reset = messages.find((message) => message.method === "sendPasswordReset");
+    assert.ok(reset?.token);
+    await rejectsToken("/auth/verify-email", reset.token);
+    const unchanged = await request("/auth/me", undefined, account.cookie);
+    assert.equal(unchanged.status, 200); assert.equal(unchanged.body.customer.email_verified, false);
+    assert.equal((await request("/auth/login", { email: account.email, password: account.password })).status, 200);
+    assert.equal(messages.filter((message) => ["sendWelcome", "sendPasswordChanged"].includes(message.method)).length, 0);
+    // A wrong-purpose attempt must not consume the legitimate link either.
+    assert.equal((await request("/auth/verify-email", { token: account.token })).status, 200);
+    assert.equal((await request("/auth/reset-password", { token: reset.token, password: "SyntheticPurpose123" })).status, 200);
+    assert.equal((await request("/auth/login", { email: account.email, password: "SyntheticPurpose123" })).status, 200);
+  });
+
+  await t.test("HTTP expired verification and recovery links cannot confirm email, change password or revoke sessions", async (context) => {
+    const { messages, request, register, rejectsToken } = await accountHttp(context);
+    const account = await register();
+    assert.equal((await request("/auth/forgot-password", { email: account.email })).status, 200);
+    const reset = messages.find((message) => message.method === "sendPasswordReset");
+    assert.ok(reset?.token);
+    // Expire the actual issued links in the disposable DB, avoiding waits or a fake store clock.
+    const [expired] = await db.query("UPDATE galatic_customer_tokens SET expires_at=DATE_SUB(UTC_TIMESTAMP(3),INTERVAL 1 MINUTE) WHERE customer_id=? AND consumed_at IS NULL", [account.id]);
+    assert.equal(expired.affectedRows, 2);
+    await rejectsToken("/auth/verify-email", account.token);
+    await rejectsToken("/auth/reset-password", reset.token);
+    const unchanged = await request("/auth/me", undefined, account.cookie);
+    assert.equal(unchanged.status, 200); assert.equal(unchanged.body.customer.email_verified, false);
+    assert.equal((await request("/auth/login", { email: account.email, password: account.password })).status, 200);
+    assert.equal(messages.filter((message) => ["sendWelcome", "sendPasswordChanged"].includes(message.method)).length, 0);
+    const [[links]] = await db.query("SELECT COUNT(*) total FROM galatic_customer_tokens WHERE customer_id=? AND consumed_at IS NULL", [account.id]);
+    assert.equal(links.total, 2);
+  });
+
+  await t.test("HTTP newsletter persists double opt-in and one-click cancellation with single-use links", async (context) => {
+    const { messages, request } = await accountHttp(context);
+    const email = `newsletter-${randomUUID()}@example.test`;
+    assert.equal((await request("/newsletter/subscribe", { email, consent: true, consent_version: "site-2026-10" })).status, 200);
+    const verification = messages.find((message) => message.method === "sendNewsletterVerification");
+    assert.ok(verification?.token);
+    const [[pending]] = await db.query("SELECT status,consent_version,action_token_hash FROM galatic_newsletter_subscribers WHERE email=?", [email]);
+    assert.equal(pending.status, "pending"); assert.equal(pending.consent_version, "site-2026-10");
+    assert.ok(pending.action_token_hash === tokenHash(verification.token), "Only a hash of the action link is persisted");
+    assert.equal((await request("/newsletter/confirm", { token: verification.token })).status, 200);
+    assert.equal((await request("/newsletter/confirm", { token: verification.token })).status, 400);
+    const confirmation = messages.find((message) => message.method === "sendNewsletterConfirmed");
+    assert.ok(confirmation?.unsubscribeToken);
+    const [[active]] = await db.query("SELECT status FROM galatic_newsletter_subscribers WHERE email=?", [email]);
+    assert.equal(active.status, "active");
+    assert.equal((await request("/newsletter/unsubscribe", { token: confirmation.unsubscribeToken })).status, 200);
+    assert.equal((await request("/newsletter/unsubscribe", { token: confirmation.unsubscribeToken })).status, 400);
+    const [[unsubscribed]] = await db.query("SELECT status,action_token_hash FROM galatic_newsletter_subscribers WHERE email=?", [email]);
+    assert.equal(unsubscribed.status, "unsubscribed"); assert.equal(unsubscribed.action_token_hash, null);
+    assert.equal(messages.filter((message) => message.method === "sendNewsletterConfirmed").length, 1);
+    assert.equal(messages.filter((message) => message.method === "sendNewsletterUnsubscribed").length, 1);
   });
 
   await t.test("zero active products keep preopening status and post-sale routes available", async () => {
