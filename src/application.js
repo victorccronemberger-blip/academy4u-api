@@ -376,7 +376,7 @@ export function createApp(overrides = {}, dependencies = {}) {
     const middleware = [tenantOrigin(context.tenant), tenantReadiness(context)];
     if (context.tenant.id === "galatic") {
       const fulfillment = createGalaticFulfillmentService({ environment: context.environment, store: context.store,
-        enviaClient, notifications: galaticNotifications });
+        enviaClient, asaasClient, notifications: galaticNotifications });
       app.use("/v1/galatic/checkout", ...middleware, createGalaticCheckoutRouter(express, {
         environment: context.environment,
         asaasClient,

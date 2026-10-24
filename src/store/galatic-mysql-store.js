@@ -1698,6 +1698,7 @@ export function createGalaticMySqlStore(databaseUrl, { dataEncryptionKey = null,
       await ensureSchema();
       const [[order]] = await pool.query(
         `SELECT o.id,o.payment_status,o.fulfillment_status,o.buyer_name,o.buyer_email,o.buyer_phone,o.buyer_document,
+                o.payment_provider,o.payment_provider_order_id,o.payment_provider_group_id,o.payment_method,o.installments,o.total_cents,
                 o.shipping_address_json,q.service_code,q.service_name
            FROM galatic_orders o LEFT JOIN galatic_shipping_quotes q ON q.id=o.shipping_quote_id WHERE o.id=?`, [orderId],
       );
