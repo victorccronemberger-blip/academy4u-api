@@ -14,9 +14,9 @@ export function validGalaticProviderPayment(payment, { allowDeletedTerminal = fa
     && (!payment.deleted || (allowDeletedTerminal && TERMINAL_EVIDENCE.has(payment.status)))
     && (payment.installment === undefined || payment.installment === null
       || (typeof payment.installment === "string" && PROVIDER_ID.test(payment.installment)))
-    && (payment.installmentNumber === undefined || (Number.isInteger(payment.installmentNumber) && payment.installmentNumber >= 1 && payment.installmentNumber <= 10))
+    && (payment.installmentNumber === undefined || payment.installmentNumber === null || (Number.isInteger(payment.installmentNumber) && payment.installmentNumber >= 1 && payment.installmentNumber <= 10))
     && (payment.refundedValue === undefined || (typeof payment.refundedValue === "number" && Number.isFinite(payment.refundedValue) && payment.refundedValue >= 0))
-    && (payment.refunds === undefined || (Array.isArray(payment.refunds) && payment.refunds.every((refund) => refund && typeof refund === "object" && !Array.isArray(refund)))));
+    && (payment.refunds === undefined || payment.refunds === null || (Array.isArray(payment.refunds) && payment.refunds.every((refund) => refund && typeof refund === "object" && !Array.isArray(refund)))));
 }
 
 export function completeGalaticPaymentList(result, expectedCount) {

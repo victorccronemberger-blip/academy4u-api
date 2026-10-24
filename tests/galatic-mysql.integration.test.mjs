@@ -12,6 +12,8 @@ import { createGalaticPaymentRecovery } from "./helpers/payment-profiles.mjs";
 import { createApp } from "../src/application.js";
 import { tokenHash } from "../src/domain/password.js";
 import { createGalaticPaymentMaintenance } from "./helpers/payment-profiles.mjs";
+import { loadGalaticPaymentProof, cancelBoundGalaticPayment } from "../src/services/galatic-payment-proof.js";
+import { createGalaticFulfillmentService } from "../src/services/galatic-fulfillment.js";
 
 const databaseUrl = process.env.MYSQL_TEST_URL;
 const logistics = { weight_grams: 1000, length_cm: 30, width_cm: 20, height_cm: 10 };
@@ -730,5 +732,52 @@ test("Galatic transactions against local disposable MySQL", { skip: !databaseUrl
     const [[old]] = await db.query("SELECT COUNT(*) total,MIN(reconciliation_attempts) attempts FROM galatic_payment_events WHERE event_id LIKE 'evt_receipt_fair_old_%' AND applied_at IS NULL AND status='canceled'");
     assert.equal(old.total, 50); assert.equal(old.attempts, 1);
     assert.ok((await db.query("SELECT applied_at FROM galatic_payment_events WHERE event_id='evt_receipt_fair_valid'"))[0][0].applied_at);
+  });
+
+  await t.test("nullable provider metadata survives bound SQL recovery/reconstruction without weakening cancellation or reversal label proof", async () => {
+    for (const reversed of [false, true]) {
+      const [[before]] = await db.query("SELECT stock_quantity stock FROM galatic_products WHERE sku='TEST01'");
+      const key = randomUUID(), { order } = await prepare({ key });
+      const pricing = { baseCents: order.totalCents, totalCents: order.totalCents, feeCents: 0, installmentCents: order.totalCents };
+      const evidence = { object: "payment", id: reversed ? "pay_nullable_reversed" : "pay_nullable_pending", customer: "cus_nullable_synthetic",
+        billingType: "PIX", status: reversed ? "CONFIRMED" : "PENDING", value: order.totalCents / 100, externalReference: `galatic:${order.id}`,
+        installment: null, installmentNumber: null, deleted: false, refunds: reversed ? [{ status: "REQUESTED", value: 1 }] : null };
+      const preserved = structuredClone(evidence); let deletes = 0, labels = 0;
+      await store.beginPaymentCreation(key, order.id, { customerId: evidence.customer, pricing });
+      await store.markPaymentCreationUncertain(key, "synthetic_nullable_response");
+      const recoveredStore = newStore(); await recoveredStore.ensureSchema();
+      const client = { findPaymentsByExternalReference: async (reference) => { assert.equal(reference, evidence.externalReference);
+        return { object: "list", totalCount: 1, offset: 0, limit: 1, hasMore: false, data: [evidence] }; },
+        getPayment: async (id) => { assert.equal(id, evidence.id); return evidence; },
+        getPixQrCode: async () => ({ encodedImage: "SYNTHETIC", payload: "SYNTHETIC_PIX" }),
+        createPayment: async () => assert.fail("Recovery must not POST"), deletePayment: async () => { deletes++; return { deleted: true }; } };
+      const recovered = await createGalaticPaymentRecovery({ store: recoveredStore, asaasClient: client,
+        financialGate: createGalaticFinancialGate({ enabled: true }) })({ key });
+      assert.equal(recovered.body.status, reversed ? "paid" : "open"); assert.equal(recovered.body.totalCents, order.totalCents);
+      await recoveredStore.close(); stores.splice(stores.indexOf(recoveredStore), 1);
+      const reconstructed = newStore(); await reconstructed.ensureSchema();
+      const operation = await reconstructed.getCheckoutRecovery({ key });
+      assert.equal(operation.profileId, PROFILE_ID); assert.equal(operation.order.profileId, PROFILE_ID);
+      assert.equal(operation.order.providerOrderId, evidence.id); assert.equal(operation.providerCustomerId, evidence.customer);
+      assert.equal(operation.pricing.totalCents, order.totalCents);
+      const paymentProfiles = syntheticProfiles(reconstructed, client);
+      const input = { store: reconstructed, paymentProfiles, order: operation.order };
+      const proof = await loadGalaticPaymentProof(input);
+      assert.equal(proof.unpaid, !reversed); assert.equal(proof.paid, false);
+      if (!reversed) {
+        assert.equal(await cancelBoundGalaticPayment(input), true); assert.equal(deletes, 1);
+        assert.equal((await reconstructed.getOrderByPublicId(order.id)).status, "canceled");
+      } else {
+        await assert.rejects(() => cancelBoundGalaticPayment(input)); assert.equal(deletes, 0);
+        const fulfillment = createGalaticFulfillmentService({ store: reconstructed, paymentProfiles, financialGate: createGalaticFinancialGate({ enabled: true }),
+          environment: { galaticEnviaEnvironment: "sandbox", galaticShippingOrigin: buyer.address },
+          enviaClient: { ready: true, generateLabel: async () => { labels++; assert.fail("Reversed payment cannot issue label"); } } });
+        await assert.rejects(() => fulfillment.createLabel(order.id), { code: "shipping_payment_unverified" }); assert.equal(labels, 0);
+        const [[saved]] = await db.query("SELECT stock_released_at,payment_profile_id,payment_provider_order_id FROM galatic_orders WHERE id=?", [order.id]);
+        assert.equal(saved.stock_released_at, null); assert.equal(saved.payment_profile_id, PROFILE_ID); assert.equal(saved.payment_provider_order_id, evidence.id);
+      }
+      const [[after]] = await db.query("SELECT stock_quantity stock FROM galatic_products WHERE sku='TEST01'");
+      assert.equal(after.stock, before.stock - Number(reversed)); assert.deepEqual(evidence, preserved);
+    }
   });
 });
