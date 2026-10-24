@@ -46,7 +46,7 @@ async function fingerprint(directory) {
     if (entry.isDirectory()) await fingerprint(target);
     else {
       sourceHash.update(path.relative(root, target).replaceAll("\\", "/"));
-      sourceHash.update("\0"); sourceHash.update((await readFile(target, "utf8")).replaceAll("\r\n", "\n")); sourceHash.update("\0");
+      sourceHash.update("\0"); sourceHash.update((new TextDecoder("utf-8", { fatal: true }).decode(await readFile(target))).replaceAll("\r\n", "\n")); sourceHash.update("\0");
     }
   }
 }

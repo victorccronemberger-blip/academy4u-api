@@ -1,3 +1,4 @@
+import { createGalaticPaymentProfiles } from "./services/galatic-payment-profiles.js";
 import { createGalaticFinancialGate, readGalaticBuildMetadata } from "./services/galatic-financial-gate.js";
 import cors from "cors";
 import express from "express";
@@ -198,7 +199,15 @@ export function createApp(overrides = {}, dependencies = {}) {
       if (tenant.id !== "galatic") throw error;
       store = { ensureSchema: async () => { throw error; }, close: async () => {} };
     }
-    const installmentService = dependencies.installmentServices?.[tenant.id]
+    if (tenant.id === "galatic") {
+      for (const key of Object.keys(tenantEnvironment)) if (key.startsWith("asaas")) delete tenantEnvironment[key];
+      tenantEnvironment.asaasEnvironment = null;
+      tenantEnvironment.checkoutEnabled = false;
+    }
+    const paymentProfiles = tenant.id === "galatic" ? dependencies.galaticPaymentProfiles ?? createGalaticPaymentProfiles({
+      source, store, financialGate: galaticFinancialGate, legacyWebhookAuthentication: environment, createClient: dependencies.createGalaticAsaasClient,
+    }) : null;
+    const installmentService = tenant.id === "galatic" ? null : dependencies.installmentServices?.[tenant.id]
       ?? (tenant.isDefault ? dependencies.installmentService : null)
       ?? createInstallmentService({ asaasClient, store });
     const readiness = { status: "connecting", error: null };
@@ -219,7 +228,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       environment: tenantEnvironment,
       store,
       installmentService,
-      ...(tenant.id === "galatic" ? { financialGate: galaticFinancialGate } : {}),
+      ...(tenant.id === "galatic" ? { financialGate: galaticFinancialGate, paymentProfiles } : {}),
       readiness,
       productResolver,
       ...(artActivation ? { artActivation } : {}),
@@ -258,6 +267,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       onAccessRevoked: context.onAccessRevoked,
       referencePrefix: tenant.referencePrefix,
       financialGate: context.financialGate,
+      legacyGalaticAuthentication: tenant.id === "galatic" ? environment : null,
     });
     contexts.set(tenant.id, context);
   }
@@ -271,7 +281,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       // A single-tenant deployment keeps compatibility with the existing LMS
       // runtime switch. In multi-tenant mode the provider environment is a
       // backend-wide setting and must come only from deployment secrets.
-      if (contexts.size === 1 && typeof defaultContext.store.getPaymentRuntimeConfig === "function") {
+      if (contexts.size === 1 && defaultContext.tenant.id !== "galatic" && typeof defaultContext.store.getPaymentRuntimeConfig === "function") {
         const runtime = await defaultContext.store.getPaymentRuntimeConfig();
         if (runtime?.environment) applyAsaasRuntimeConfig(environment, runtime);
         Object.assign(defaultContext.environment, environment, {
@@ -283,7 +293,8 @@ export function createApp(overrides = {}, dependencies = {}) {
         });
       }
       if (
-        environment.nodeEnvironment === "production"
+        [...contexts.values()].some((context) => context.tenant.id !== "galatic")
+        && environment.nodeEnvironment === "production"
         && environment.checkoutEnabled
         && !environment.asaasWebhookToken
         && !environment.asaasWebhookTokenHash
@@ -291,7 +302,8 @@ export function createApp(overrides = {}, dependencies = {}) {
         throw new Error("An Asaas webhook credential is required when checkout is enabled in production.");
       }
       if (
-        environment.nodeEnvironment === "production"
+        [...contexts.values()].some((context) => context.tenant.id !== "galatic")
+        && environment.nodeEnvironment === "production"
         && environment.checkoutEnabled
         && typeof asaasClient?.verifyCredentials === "function"
       ) {
@@ -302,14 +314,17 @@ export function createApp(overrides = {}, dependencies = {}) {
     .catch((error) => {
       // Provider credentials/environment are global; database readiness is not.
       for (const context of contexts.values()) {
-        context.readiness.status = "error";
-        context.readiness.error = error?.code || error?.name || "provider_initialization_failed";
+        if (context.tenant.id !== "galatic") {
+          context.readiness.status = "error";
+          context.readiness.error = error?.code || error?.name || "provider_initialization_failed";
+        }
       }
       throw error;
     });
 
   for (const context of contexts.values()) {
-    context.ready = Promise.all([providerReady, context.dataReady]).then(() => {
+    context.ready = Promise.all([context.tenant.id === "galatic" ? Promise.resolve() : providerReady, context.dataReady]).then(async () => {
+      if (context.paymentProfiles) await context.paymentProfiles.initialize();
       context.readiness.status = "ready";
       if (context === defaultContext && context.artRetryWorker && environment.artEnabled) {
         context.artRetryWorker.start(Number(environment.artRetryIntervalMs) || 5 * 60_000);
@@ -381,10 +396,10 @@ export function createApp(overrides = {}, dependencies = {}) {
     const middleware = [tenantOrigin(context.tenant), tenantReadiness(context)];
     if (context.tenant.id === "galatic") {
       const fulfillment = createGalaticFulfillmentService({ environment: context.environment, store: context.store,
-        enviaClient, asaasClient, notifications: galaticNotifications, financialGate: context.financialGate });
+        enviaClient, paymentProfiles: context.paymentProfiles, notifications: galaticNotifications, financialGate: context.financialGate });
       const galaticCheckoutRouter = createGalaticCheckoutRouter(express, {
         environment: context.environment,
-        asaasClient,
+        paymentProfiles: context.paymentProfiles,
         store: context.store,
         notifications: galaticNotifications,
         botChallenge,
@@ -393,7 +408,7 @@ export function createApp(overrides = {}, dependencies = {}) {
       context.checkoutRouter = galaticCheckoutRouter;
       app.use("/v1/galatic/checkout", ...middleware, galaticCheckoutRouter);
       app.use("/v1/galatic/admin", ...middleware, createGalaticAdminRouter(express, {
-        environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment, asaasClient, botChallenge, financialGate: context.financialGate,
+        environment: context.environment, store: context.store, notifications: galaticNotifications, fulfillment, paymentProfiles: context.paymentProfiles, botChallenge, financialGate: context.financialGate,
       }));
       const shippingRouter = createGalaticShippingRouter(express, {
         environment: context.environment,
@@ -482,6 +497,11 @@ export function createApp(overrides = {}, dependencies = {}) {
     return context.webhookHandler(request, response);
   });
   const galaticContext = contexts.get("galatic");
+  if (galaticContext) app.post("/v1/webhooks/asaas/profiles/:profileId", webhookLimiter,
+    createAsaasWebhookHandler({ environment: galaticContext.environment, store: galaticContext.store,
+      onAccessGranted: galaticContext.onAccessGranted, onAccessRevoked: galaticContext.onAccessRevoked,
+      referencePrefix: galaticContext.tenant.referencePrefix, financialGate: galaticContext.financialGate,
+      paymentProfiles: galaticContext.paymentProfiles }));
   if (galaticContext) app.post("/v1/webhooks/envia", webhookLimiter,
     createEnviaWebhookHandler({ environment: galaticContext.environment, store: galaticContext.store,
       notifications: galaticNotifications, financialGate: galaticContext.financialGate }));

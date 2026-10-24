@@ -1,7 +1,7 @@
 # Pagamentos multiempresa
 
 Uma implantação da API pode atender Academy4u e Galatic sem compartilhar os
-dados de negócio. O Asaas, o código Node e o domínio da API são comuns; banco,
+dados de negócio. O código Node e o domínio da API são comuns; conta Asaas, banco,
 origem pública, token confiável, catálogo, pedidos, webhooks e entrega são
 resolvidos dentro do contexto de cada plataforma.
 
@@ -12,7 +12,7 @@ resolvidos dentro do contexto de cada plataforma.
 - A API recusa a inicialização se duas plataformas reutilizarem banco, origem ou prefixo.
 - Uma origem Galatic não pode chamar uma rota Academy4u.
 - O token do aluno é consultado somente no banco da plataforma selecionada.
-- O webhook usa o prefixo financeiro para selecionar o banco antes de persistir o evento.
+- O webhook Galatic autentica um perfil exclusivo antes de persistir o evento e exige vínculo compatível. O endpoint antigo mantém a compatibilidade Academy.
 
 ## Rotas
 
@@ -22,13 +22,14 @@ resolvidos dentro do contexto de cada plataforma.
 /v1/galatic/checkout/*
 /v1/galatic/quote
 /v1/webhooks/asaas
+/v1/webhooks/asaas/profiles/:profileId
 /health
 /health/academy4u
 /health/galatic
 ```
 
-As rotas antigas `/v1/checkout/*` e `/v1/public/*` permanecem como aliases da
-primeira plataforma configurada para não interromper a Academy4u.
+`/v1/checkout/*` usa o router da primeira plataforma, com as mesmas proteções.
+Os aliases `/v1/public/*` e `/v1/art/*` existem somente com Academy como padrão.
 
 ## Autenticação por plataforma
 
@@ -45,20 +46,24 @@ primeira plataforma configurada para não interromper a Academy4u.
 
 ## Asaas
 
-O ambiente do provedor (`sandbox` ou `production`) é global, pois a mesma
-implantação compartilha a integração. Em modo multiempresa ele é controlado
-somente pelas variáveis seguras do backend; nenhum banco pode trocar o ambiente
-dos demais.
+Academy preserva seu adapter e a configuração legada `ASAAS_*`, incluindo o
+runtime LMS em implantação exclusiva Academy. Galatic usa perfis imutáveis
+próprios e nunca recorre ao cliente ou às credenciais globais. A seleção padrão
+vale somente para novas operações; pedidos, tentativas, ações e eventos
+continuam no perfil persistido. Consulte [o contrato operacional dos perfis](GALATIC-PAYMENT-PROFILES.md)
+para verificação de WalletId, capacidades, TTL, migração aditiva e cutover bloqueado.
 
-O webhook continua único:
+Os endpoints são:
 
 ```text
 POST https://api.academy4u.com.br/v1/webhooks/asaas
+POST https://api.academy4u.com.br/v1/webhooks/asaas/profiles/:profileId
 ```
 
 O `externalReference` tem o formato `academy:<idempotency-key>` ou
-`galatic:<order-id>`. Prefixos desconhecidos são rejeitados antes de
-qualquer acesso ao MySQL.
+`galatic:<order-id>`. Galatic exige autenticação do perfil antes de inspeção
+financeira ou deduplicação. Uma chegada Galatic autenticada no endpoint antigo
+recebe 503 para reenvio; não é aplicada nem atribuída a um perfil padrão.
 
 ## Galatic (loja de produtos físicos)
 
@@ -68,7 +73,7 @@ implementado: tabelas `galatic_*` próprias, catálogo físico, cotação de fre
 webhooks. O checkout aceita exclusivamente Pix à vista e cartão de crédito de
 1 a 10 parcelas, com o custo financeiro do parcelamento repassado conforme a
 tabela retornada pelo Asaas. Produto físico não gera matrícula — a confirmação
-move `fulfillment_status` para `paid`.
+move `fulfillment_status` para `preparing`, sujeito aos controles de estoque.
 
 Para incluir `galatic` em `PAYMENT_TENANTS`:
 
@@ -87,7 +92,8 @@ Para incluir `galatic` em `PAYMENT_TENANTS`:
 4. `GALATIC_SMTP_HOST`, `GALATIC_SMTP_PORT`, `GALATIC_SMTP_SECURE`,
    `GALATIC_SMTP_USER`, `GALATIC_SMTP_PASSWORD`, `GALATIC_MAIL_FROM` e
    `GALATIC_MAIL_FROM_NAME` para mensagens transacionais;
-5. testes sandbox de Pix e cartão (1x e 10x) para a Galatic e dos meios próprios
+5. perfis Galatic, capacidades revisadas, cutover autorizado por prova de dreno e
+   testes sandbox de Pix e cartão (1x e 10x), além dos meios próprios
    da Academy4u;
 6. webhook confirma no banco correto e não toca o outro banco;
 7. teste de restauração dos dois backups.

@@ -1,3 +1,4 @@
+import { createGalaticDeferredEventReconciliation } from "../services/galatic-payment-events.js";
 import { closedGalaticFinancialGate } from "../services/galatic-financial-gate.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { normalizeAsaasWebhookStatus } from "../domain/payment-status.js";
@@ -25,23 +26,29 @@ export function createAsaasWebhookHandler({
   onAccessGranted,
   onAccessRevoked,
   referencePrefix = "academy",
+  paymentProfiles = null,
+  legacyGalaticAuthentication = null,
   financialGate = closedGalaticFinancialGate,
 }) {
   const isGalatic = environment.tenantId === "galatic" || referencePrefix === "galatic";
+  const reconcileDeferred = isGalatic ? createGalaticDeferredEventReconciliation({ store, paymentProfiles, financialGate }) : null;
   const handler = async function asaasWebhook(request, response) {
-    if (!environment.asaasWebhookToken && !environment.asaasWebhookTokenHash) {
-      response.status(503).json({ error: "webhook_not_configured" });
-      return;
+    let profileId = null;
+    if (isGalatic && paymentProfiles) {
+      try { profileId = paymentProfiles.authenticateProfileWebhook(request.params.profileId, request.get("asaas-access-token")).profileId; }
+      catch (error) { return response.status(error.status ?? 503).json({ error: error.code ?? "payment_profile_unavailable" }); }
+      if (!financialGate.enabled) return financialGate.paused(response);
+      try { await paymentProfiles.getVerifiedClient({ profileId }, "webhook"); }
+      catch (error) { return response.status(503).json({ error: error.code }); }
+    } else {
+      const auth = isGalatic ? legacyGalaticAuthentication : environment;
+      if (!auth?.asaasWebhookToken && !auth?.asaasWebhookTokenHash) return response.status(503).json({ error: "webhook_not_configured" });
+      const authenticated = auth.asaasWebhookTokenHash
+        ? safeHashEqual(request.get("asaas-access-token"), auth.asaasWebhookTokenHash)
+        : safeEqual(request.get("asaas-access-token"), auth.asaasWebhookToken);
+      if (!authenticated) return response.status(401).json({ error: "invalid_webhook_token" });
+      if (isGalatic) return response.status(503).json({ error: "payment_profile_route_required" });
     }
-    const webhookAuthenticated = environment.asaasWebhookTokenHash
-      ? safeHashEqual(request.get("asaas-access-token"), environment.asaasWebhookTokenHash)
-      : safeEqual(request.get("asaas-access-token"), environment.asaasWebhookToken);
-    if (!webhookAuthenticated) {
-      response.status(401).json({ error: "invalid_webhook_token" });
-      return;
-    }
-
-    if (isGalatic && !financialGate.enabled) return financialGate.paused(response);
 
     const event = String(request.body?.event ?? "").trim().toUpperCase();
     const eventId = String(request.body?.id ?? "").trim();
@@ -62,7 +69,12 @@ export function createAsaasWebhookHandler({
     try {
       let persisted;
       let accessGrantedNow = false;
-      if (providerGroupId) {
+      if (isGalatic) {
+        persisted = await store.ingestAuthenticatedEvent({ profileId, event: { provider: "asaas", providerOrderId: orderId,
+          providerGroupId, eventId, externalReference, status: normalizeAsaasWebhookStatus(event, payment?.status),
+          paymentEvidence: { status: payment.status, deleted: payment.deleted, refundedValue: payment.refundedValue, refunds: payment.refunds, id: payment.id, customer: payment.customer, billingType: payment.billingType, value: payment.value,
+            installment: payment.installment, externalReference } } });
+      } else if (providerGroupId) {
         const installment = normalizeProviderInstallment(payment);
         if (!installment) {
           response.status(400).json({ error: "invalid_installment_webhook" });
@@ -70,26 +82,33 @@ export function createAsaasWebhookHandler({
         }
         installment.status = normalizeAsaasWebhookStatus(event, payment?.status);
         persisted = await store.updatePaymentInstallmentFromWebhook({
-          provider: "asaas",
+          profileId, provider: "asaas",
           providerOrderId: orderId,
           providerGroupId,
           installment,
           eventId,
           externalReference,
-          paymentEvidence: { id: payment.id, customer: payment.customer, billingType: payment.billingType, value: payment.value, installment: payment.installment, externalReference },
+          paymentEvidence: { status: payment.status, deleted: payment.deleted, refundedValue: payment.refundedValue, refunds: payment.refunds, id: payment.id, customer: payment.customer, billingType: payment.billingType, value: payment.value, installment: payment.installment, externalReference },
         });
         accessGrantedNow = persisted?.accessGrantedNow === true;
       } else {
         persisted = await store.updateOrderFromWebhook({
-          provider: "asaas",
+          profileId, provider: "asaas",
           providerOrderId: orderId,
           providerGroupId: null,
           status: normalizeAsaasWebhookStatus(event, payment?.status),
           eventId,
           externalReference,
-          paymentEvidence: { id: payment.id, customer: payment.customer, billingType: payment.billingType, value: payment.value, installment: payment.installment, externalReference },
+          paymentEvidence: { status: payment.status, deleted: payment.deleted, refundedValue: payment.refundedValue, refunds: payment.refunds, id: payment.id, customer: payment.customer, billingType: payment.billingType, value: payment.value, installment: payment.installment, externalReference },
         });
         accessGrantedNow = persisted?.status === "paid" && persisted?.previousStatus !== "paid";
+      }
+      if (isGalatic && persisted?.externalReference?.startsWith(`${referencePrefix}:`)) {
+        const reconciled = await reconcileDeferred({ profileId, orderId: persisted.externalReference.slice(referencePrefix.length + 1) });
+        if (reconciled.lastApplied) {
+          persisted = reconciled.lastApplied;
+          accessGrantedNow = persisted.status === "paid" && persisted.previousStatus !== "paid";
+        }
       }
       if (accessGrantedNow && persisted?.id && onAccessGranted) {
         // A entrega (ativação ART + fallback LMS) pode levar MINUTOS (provision,

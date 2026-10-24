@@ -1,3 +1,4 @@
+import { loadGalaticPaymentProof, cancelBoundGalaticPayment } from "../services/galatic-payment-proof.js";
 import { closedGalaticFinancialGate, financialRoute } from "../services/galatic-financial-gate.js";
 import { createGalaticPaymentRecovery } from "../services/galatic-payment-recovery.js";
 import { hashPassword, normalizeEmail, opaqueToken, tokenHash, verifyPassword } from "../domain/password.js";
@@ -90,7 +91,7 @@ function couponInput(body) {
   return { description: clean(body?.description), type, value, minimum, limit, perCustomer, active: body?.active === undefined || enabled(body.active) };
 }
 
-export function createGalaticAdminRouter(express, { environment, store, notifications = null, fulfillment = null, asaasClient = null,
+export function createGalaticAdminRouter(express, { environment, store, notifications = null, fulfillment = null, paymentProfiles = null,
   financialGate = closedGalaticFinancialGate,
   botChallenge = { verify: (_request, _response, next) => next() } }) {
   const router = express.Router();
@@ -228,6 +229,10 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
 
   router.get("/orders", async (_request, response) => response.json({ orders: await store.adminListOrders() }));
   router.get("/orders/:id/payment/refund-history", async (request, response) => response.json({ attempts: await store.adminRefundHistory?.(request.params.id) ?? [] }));
+  financialRoute(router, financialGate, "post", "/payment-profiles/:id/verify", requireOwner, financialGate.middleware, allowBodyFields([]), async (request, response) => {
+    try { await paymentProfiles.verifyProfile(request.params.id); return response.json({ verified: true }); }
+    catch (error) { return response.status(503).json({ error: error?.code ?? "payment_profile_verification_failed" }); }
+  });
   router.get("/refund-operations", async (_request, response) => response.json({ operations: await store.adminRefundOperations?.() ?? [] }));
   router.get("/payment-operations", async (_request, response) => response.json({ operations: await store.adminPaymentOperations?.() ?? [] }));
   router.get("/notification-jobs", async (_request, response) => response.json({ jobs: await store.adminNotificationJobs?.() ?? [] }));
@@ -236,9 +241,9 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     const result = await store.adminOrder(request.params.id); return result ? response.json(result) : response.status(404).json({ error: "order_not_found" });
   });
   financialRoute(router, financialGate, "post", "/orders/:id/payment/reconcile", requireOwner, financialGate.middleware, allowBodyFields([]), async (request, response) => {
-    if (!asaasClient || !store.getCheckoutRecovery) return response.status(503).json({ error: "payment_unavailable" });
+    if (!paymentProfiles || !store.getCheckoutRecovery) return response.status(503).json({ error: "payment_unavailable" });
     try {
-      const result = await createGalaticPaymentRecovery({ store, asaasClient, financialGate })({ orderId: request.params.id });
+      const result = await createGalaticPaymentRecovery({ store, paymentProfiles, financialGate })({ orderId: request.params.id });
       if (!result) return response.status(409).json({ error: "payment_reconciliation_not_pending" });
       await store.recordOperationalAlert?.({ type: "payment_reconciled", source: "galatic-admin", severity: "info",
         summary: "Tentativa conciliada com o provedor.", context: { orderId: request.params.id, adminId: request.galaticAdmin.id } });
@@ -246,26 +251,14 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     } catch (error) { return response.status(409).json({ error: error?.code ?? "payment_reconciliation_pending" }); }
   });
   financialRoute(router, financialGate, "post", "/orders/:id/payment/cancel", requireOwner, financialGate.middleware, allowBodyFields([]), async (request, response) => {
-    if (!asaasClient) return response.status(503).json({ error: "payment_unavailable" });
+    if (!paymentProfiles) return response.status(503).json({ error: "payment_unavailable" });
     const order = await store.adminPaymentContext(request.params.id);
     if (!order) return response.status(404).json({ error: "order_not_found" });
     if (["paid", "refunded", "chargeback"].includes(order.status)) {
       return response.status(409).json({ error: "paid_order_cannot_be_canceled", message: "Use o fluxo de estorno para um pedido pago." });
     }
     try {
-      if (!order.providerOrderId) {
-        const canceled = await store.adminCancelUnpaidOrder(order.id);
-        if (canceled) await notifyOnce(order.id, "payment-canceled", "sendPaymentCanceled");
-        return response.json({ canceled: Boolean(canceled), order_id: order.id });
-      }
-      const provider = await asaasClient.getPayment(order.providerOrderId);
-      if (normalizeAsaasPaymentStatus(provider?.status) === "paid") {
-        await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: order.providerOrderId, status: "paid" });
-        return response.status(409).json({ error: "payment_already_received", message: "O pagamento já foi recebido e não pode ser cancelado." });
-      }
-      if (order.providerGroupId) await asaasClient.deleteInstallment(order.providerGroupId);
-      else await asaasClient.deletePayment(order.providerOrderId);
-      const canceled = await store.adminCancelUnpaidOrder(order.id);
+      const canceled = await cancelBoundGalaticPayment({ store, paymentProfiles, order, adminId: request.galaticAdmin.id });
       if (canceled) await notifyOnce(order.id, "payment-canceled", "sendPaymentCanceled");
       return response.json({ canceled: Boolean(canceled), order_id: order.id });
     } catch (error) {
@@ -275,7 +268,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     }
   });
   financialRoute(router, financialGate, "post", "/orders/:id/payment/refund", requireOwner, financialGate.middleware, allowBodyFields(["confirmation"]), async (request, response) => {
-    if (!asaasClient) return response.status(503).json({ error: "payment_unavailable" });
+    if (!paymentProfiles) return response.status(503).json({ error: "payment_unavailable" });
     const order = await store.adminPaymentContext(request.params.id);
     if (!order) return response.status(404).json({ error: "order_not_found" });
     if (clean(request.body?.confirmation, 80) !== order.id) {
@@ -283,7 +276,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     }
     if (order.status !== "paid") return response.status(409).json({ error: "order_not_paid" });
     let claim;
-    try { claim = await store.claimRefund(order.id, request.galaticAdmin.id); }
+    try { await paymentProfiles.getVerifiedClient(order, "refund"); claim = await store.claimRefund(order.id, request.galaticAdmin.id); }
     catch (error) { return response.status(409).json({ error: error?.code ?? "refund_unavailable" }); }
     const reply = (operation, status = 202) => response.status(status).json({
       requested: operation?.state === "requested", completed: operation?.state === "completed",
@@ -297,8 +290,10 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     });
     if (!claim.claimed) return reply(await store.adminRefundOperation(order.id));
     try {
-      const provider = claim.group ? await asaasClient.refundInstallment(claim.providerReference)
-        : await asaasClient.refundPayment(claim.providerReference);
+      const proof = await loadGalaticPaymentProof({ store, paymentProfiles, order: claim, snapshot: claim, capability: "refund" });
+      if (!proof.paid) throw Object.assign(new Error("refund_payment_unverified"), { code: "refund_payment_unverified" });
+      const provider = claim.group ? await proof.client.refundInstallment(claim.providerReference)
+        : await proof.client.refundPayment(claim.providerReference);
       const reason = refundRequestReason(provider, claim.providerReference);
       const finished = await store.finishRefundRequest(order.id, "requested", reason, claim.version);
       const operation = await store.adminRefundOperation(order.id);
@@ -321,6 +316,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   financialRoute(router, financialGate, "post", "/orders/:id/shipping/manual-dispatch", financialGate.middleware, allowBodyFields(["tracking_code"]), async (request, response) => {
     const tracking = clean(request.body?.tracking_code, 100);
     if (!/^[A-Za-z0-9._\-/]{5,100}$/.test(tracking)) return response.status(400).json({ error: "invalid_tracking" });
+    if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
+    await fulfillment.verifyProductionPayment(await store.shipmentCreationContext(request.params.id));
     const updated = await store.adminUpdateShipping(request.params.id, { status: "posted", trackingCode: tracking, description: "Pedido postado." });
     if (updated) await notifyOnce(request.params.id, `shipping-posted:${tracking}`, "sendShippingUpdate",
       { status: "posted", trackingCode: tracking, description: "Pedido postado." });
@@ -330,6 +327,8 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     const status = clean(request.body?.shipping_status, 32);
     if (!["in_transit", "out_for_delivery", "delivered", "delivery_exception", "returned"].includes(status)) return response.status(400).json({ error: "invalid_shipping_status" });
     const description = clean(request.body?.description, 500);
+    if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
+    await fulfillment.verifyProductionPayment(await store.shipmentCreationContext(request.params.id));
     const updated = await store.adminUpdateShipping(request.params.id, { status, description });
     if (updated) await notifyOnce(request.params.id, `shipping-${status}`, "sendShippingUpdate",
       { status, description });
@@ -423,16 +422,17 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     });
     return updated ? response.json({ updated: true }) : response.status(404).json({ error: "product_not_found" });
   });
-  router.get("/integrations", (_request, response) => response.json({ integrations: {
+  router.get("/integrations", async (_request, response) => { const readiness = await paymentProfiles.getPaymentReadiness(); return response.json({ integrations: {
     database: { configured: true, service: "MySQL Galatic isolado" },
-    asaas: { configured: Boolean(environment.checkoutEnabled), mode: environment.asaasEnvironment, service: "Pix e cartão" },
+    asaas: { configured: readiness.checkoutAvailable, profile_status: readiness.profileStatus, mode: readiness.paymentEnvironment, service: "Pix e cartão" },
     payment_maintenance: { configured: Boolean(environment.galaticPaymentMaintenanceEnabled),
       service: `Expiração Pix ${environment.galaticPixReservationMinutes} min · cartão ${environment.galaticCardReservationMinutes} min` },
     envia: { configured: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin), mode: environment.galaticEnviaEnvironment,
       webhook: Boolean(environment.galaticEnviaWebhookSecret || environment.galaticEnviaWebhookToken), service: "Envia" },
     mail: { configured: Boolean(notifications?.ready), service: notifications?.provider === "hostinger-mail-api" ? "Hostinger Mail API" : "SMTP Galatic" },
-  } }));
+  } }); });
   router.get("/readiness", async (_request, response) => {
+    const readiness = await paymentProfiles.getPaymentReadiness();
     const products = await store.adminListProducts();
     const catalog = { active_products: products.filter((item) => item.active === 1).length,
       missing_weight: products.filter((item) => item.active === 1 && !(Number(item.weight_grams) > 0)).length,
@@ -441,9 +441,9 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       missing_cost: products.filter((item) => item.active === 1 && !knownCostAmount(item.cost_amount)).length };
     const checks = [
       { key: "database", label: "Banco Galatic isolado", required: true, passed: true },
-      { key: "checkout", label: "Asaas configurado", required: true, passed: Boolean(environment.checkoutEnabled) },
+      { key: "checkout", label: "Asaas configurado", required: true, passed: readiness.checkoutAvailable },
       { key: "payment_environment", label: "Asaas em ambiente de produção", required: true,
-        passed: environment.asaasEnvironment === "production" },
+        passed: readiness.paymentEnvironment === "production" },
       { key: "payment_maintenance", label: "Expiração segura de reservas abandonadas", required: true,
         passed: Boolean(environment.galaticPaymentMaintenanceEnabled) },
       { key: "shipping", label: "Envia e origem de postagem", required: true, passed: Boolean(environment.galaticEnviaApiKey && environment.galaticShippingOrigin) },
@@ -468,9 +468,10 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       operational_checks: [{ key: "financial_operations", passed: financialGate.enabled }],
       production_ready: configurationReady, // Legacy alias: configuration only, never commercial approval.
       sandbox_ready: sandboxReady,
-      payment_environment: environment.asaasEnvironment,
+      payment_environment: readiness.paymentEnvironment,
+      profile_status: readiness.profileStatus, commercial_approval: readiness.commercialApproval, approval_scope: readiness.approvalScope,
       shipping_environment: environment.galaticEnviaEnvironment,
-      checkout_enabled: Boolean(environment.checkoutEnabled),
+      checkout_enabled: readiness.checkoutAvailable,
       sales_enabled: Boolean(environment.galaticSalesEnabled),
       checks,
       catalog,

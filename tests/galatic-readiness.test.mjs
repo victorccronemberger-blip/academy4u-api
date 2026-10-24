@@ -11,7 +11,7 @@ async function probe({ open = false, args = [] } = {}) {
     calls.push({ method: request.method, path: request.url });
     const bodies = {
       '/health/galatic': { status: 'ok' },
-      '/v1/galatic/checkout/status': { environment: 'production', salesEnabled: open, enabled: open, reason: open ? null : 'store_not_open' },
+      '/v1/galatic/checkout/status': { profileStatus: 'verified', paymentEnvironment: 'production', checkoutAvailable: open, environment: 'production', salesEnabled: open, enabled: open, reason: open ? null : 'store_not_open' },
       '/v1/galatic/shipping/status': { enabled: open },
       '/v1/galatic/catalog/products': { products: open ? [{ sku: 'SYNTHETIC', active: 1, unit_amount: 100 }] : [] },
     };
@@ -20,7 +20,7 @@ async function probe({ open = false, args = [] } = {}) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
-    const child = spawn(process.execPath, [script, ...args], { env: { ...process.env, GALATIC_AUDIT_API_ORIGIN: `http://127.0.0.1:${server.address().port}` } });
+    const child = spawn(process.execPath, [script, ...args], { windowsHide: true, env: { ...process.env, GALATIC_AUDIT_API_ORIGIN: `http://127.0.0.1:${server.address().port}` } });
     let output = '';
     child.stdout.on('data', data => { output += data; });
     child.stderr.on('data', data => { output += data; });

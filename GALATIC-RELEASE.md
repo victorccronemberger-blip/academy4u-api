@@ -2,6 +2,12 @@
 
 O processo também atende Academy4u. O gate `GALATIC_SALES_ENABLED` controla apenas novas compras Galatic. Em produção, ausência da variável equivale a `false`. Conta, recuperação, consulta de pedidos, webhooks e pós-venda continuam disponíveis com as vendas fechadas.
 
+Stage B adiciona [perfis financeiros imutáveis](docs/GALATIC-PAYMENT-PROFILES.md).
+O guard financeiro continua fechado. Sem perfil, a API informa ambiente de
+pagamento `null` e checkout indisponível, mantendo conta, catálogo, histórico e
+e-mail. O cutover destrutivo em produção permanece bloqueado por falta de prova
+de término de todos os processos anteriores; boot e health novos não provam dreno.
+
 ## Estado comercial desta entrega
 
 Operação em preparação: o CNPJ anterior foi encerrado e o novo cadastro e abastecimento ainda dependem de comprovação externa. Não abrir vendas, anunciar estoque, publicar anúncios pagos ou emitir etiquetas com dados anteriores. Não há fornecedor aprovado por esta alteração.
@@ -27,7 +33,11 @@ Operação em preparação: o CNPJ anterior foi encerrado e o novo cadastro e ab
 - Pagamento e pós-venda sandbox aprovados, e-mails de conta/pedido entregues, filas sem falhas pendentes e backup restaurável comprovado.
 - Conteúdo comercial/fiscal atualizado e fichas de produto verificadas. Sem inferir número de jogadores de descrições nem chamar curadoria de ranking de vendas.
 
-Depois dessas evidências, habilitar apenas `GALATIC_SALES_ENABLED=true`, reiniciar pelo mecanismo de implantação confirmado e executar `npm run galatic:audit-production -- --sales-state=open`. Uma alteração de flag não substitui as condições acima.
+Depois dessas evidências, também comprovar o cutover, a identidade do perfil,
+suas capacidades e a revisão comercial persistida descritos no contrato Stage B.
+Somente uma liberação operacional posterior pode habilitar o guard financeiro e
+as vendas. Executar então o probe com `--sales-state=open`. Flags não substituem
+esses controles nem autorizam a abertura por esta entrega.
 
 ## Recuperação de incidentes
 
@@ -39,12 +49,12 @@ Depois dessas evidências, habilitar apenas `GALATIC_SALES_ENABLED=true`, reinic
 - Outbox tem entrega pelo menos uma vez: queda após aceite do e-mail e antes do ACK pode duplicar a mensagem. Falhas possuem retry/lease e precisam de observação operacional. Webhook recebido/deferred não significa evento aplicado.
 - Estorno integral de cartão parcelado usa o grupo no Asaas. Em timeout/inconclusivo, consultar antes de repetir; não declarar ao cliente que houve estorno apenas porque ele foi solicitado.
 - O detalhe administrativo expõe `refund_operation` persistido. `refund_authorization_required` com origem `refund_request_response` registra uma indicação recebida na resposta: o Asaas apontou um estorno pendente de autorização no pagamento ou parcelamento relacionado. Verificar os detalhes no painel Asaas. O aviso exige ID exato e uma única entrada de estorno válida com esse status; múltiplas entradas mantêm a resposta genérica. A entrada pode ser anterior ou parcial: não comprova que a nova solicitação exige autorização, o estado atual do provedor ou conclusão financeira. Recarregar preserva esse motivo quando a conciliação é inconclusiva; nenhuma autorização, token ou reenvio automático é realizado. `requested`, `in_progress` e `uncertain` bloqueiam novo POST; somente recusa definitiva preserva a política existente de nova tentativa confirmada. Webhook concluído vence resposta tardia do POST e não gera aviso de solicitação pendente.
-- Etiqueta nova da Envia em produção exige consulta positiva ao Asaas atualmente configurado em produção, com ID, referência Galatic, método, valor integral e cliente armazenado conferidos. Cartão parcelado exige grupo completo, sem paginação pendente, IDs únicos e todas as parcelas pagas. Erro, 404, divergência ou estorno bloqueiam antes da reserva de emissão (`shipping_payment_unverified`, HTTP 409); não alteram o pagamento local. Etiquetas já armazenadas continuam consultáveis. Em linhas legadas sem vínculo histórico de cliente/preço, ID armazenado, referência exata, método e total ainda devem coincidir em produção; o cliente atual vincula apenas as evidências do grupo, sem criar vínculo histórico. Tentativa com preço armazenado mas sem cliente é inconsistente e bloqueia. Isso não migra ambientes de pedidos antigos nem corrige o roteamento de consultas/estornos legados, a proveniência da conta por pedido ou aprova o novo cadastro comercial.
+- Nova etiqueta exige perfil imutável conhecido, capacidade e prova atual completa do pagamento. Em produção, o perfil também deve ser de produção e ter revisão comercial persistida. ID, referência, método, valor e cliente devem coincidir; cartão parcelado exige grupo completo, paginação encerrada e concordância do anchor com o grupo. Estorno, 404, dados contraditórios, perfil legado desconhecido ou ausência de vínculo histórico de tentativa bloqueiam antes do claim de emissão. Etiquetas já armazenadas continuam consultáveis. Isso não aprova o novo cadastro comercial nem atribui conta a pedidos legados.
 - Alertas antigos do monitor foram encontrados em spam em 23/10/2026. Saúde HTTP verde não comprova recebimento de alertas. Conferir autenticação do remetente e entrega controlada antes da abertura.
 
 ## Rollback
 
-Fechar novas vendas e preservar webhooks/pós-venda. A migração aditiva `legacy_catalog_v1` importa somente uma base alvo vazia e sem pedidos; base existente é preservada e marcada. Ela não corrige automaticamente saldos antigos.
+Fechar novas vendas e o guard financeiro, preservando filas e tentativas para conciliação. Após perfis mistos ou cutover de índices, usar somente builds com suporte a perfis; nunca restaurar o cliente global antigo nem remover vínculos ou índices de namespace. A migração aditiva `legacy_catalog_v1` importa somente uma base alvo vazia e sem pedidos; base existente é preservada e marcada. Ela não corrige automaticamente saldos antigos.
 
 **Não iniciar a versão antiga contra o banco migrado sem retirar o importador legado**: o boot antigo pode sobrescrever saldo. Preferir correção adiante na versão migrada; qualquer restauração de banco exige plano que preserve pedidos e eventos posteriores ao backup. Registrar SHA e evidência dos probes, sem credenciais ou dados de clientes.
 
@@ -52,9 +62,9 @@ Fechar novas vendas e preservar webhooks/pós-venda. A migração aditiva `legac
 
 `GALATIC_FINANCIAL_OPERATIONS_ENABLED` is closed when absent. Only the exact
 literal string `true` opens the captured process gate. Keep it absent or `false`
-in production throughout the migration. The `true` path is transient legacy
-compatibility for controlled tests of this staging binary; it is not permission
-to reopen production or an alternative to the immutable profile migration.
+in production throughout the migration. The Stage A `true` path was transient legacy compatibility for controlled tests.
+Stage B additionally requires the immutable profile, verification, capabilities
+and namespace phase; the flag cannot restore the old global fallback.
 
 The pause blocks Galatic checkout pricing/creation/recovery, shipping quotes and
 provider operations, administrative payment and manual shipping actions,
@@ -95,8 +105,8 @@ that every prior generation and financial worker has stopped and no older
 request can apply a result. A completed deployment, successful health check or
 one boot with counter zero is insufficient. Check all serving domains/processes
 and separately running workers. If the hosting platform cannot provide this
-evidence, keep destructive cutover blocked and continue Stage B offline. This
-release performs no schema/index migration and does not bind historical orders
-to a new account/environment. Stage B must require the guard together with the
+evidence, keep destructive cutover blocked and continue Stage B offline. The
+Stage A unit performed no schema/index migration and did not bind historical orders
+to a new account/environment. Stage B requires the guard together with the
 persisted profile, verified generation, capability and payment evidence; a true
 environment flag must never restore a global-provider fallback there.

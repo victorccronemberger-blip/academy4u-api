@@ -1,3 +1,4 @@
+import { profileSource, profileStore, walletResponse } from "./helpers/payment-profiles.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import express from "express";
@@ -55,7 +56,8 @@ async function fixture(t, overrides = {}) {
     if (key === "verifyCredentials") return async () => {};
     return async () => { calls.push(String(key)); throw Object.assign(new Error("provider404"), { status: 404 }); };
   } });
-  const runtime = createApp({ ...source, ...overrides }, { stores: { galatic: store }, asaasClient: provider, enviaClient: provider });
+  const explicit = overrides.GALATIC_FINANCIAL_OPERATIONS_ENABLED === "true";
+  const runtime = createApp({ ...source, ...overrides, ...(explicit ? profileSource("production") : {}) }, { stores: { galatic: explicit ? profileStore(store) : store }, asaasClient: provider, enviaClient: provider, createGalaticAsaasClient: () => ({ getWallets: async () => structuredClone(walletResponse) }) });
   await runtime.ready;
   return { runtime, store, calls, financialWrites, read: await serve(t, runtime.app) };
 }
@@ -115,7 +117,7 @@ test("Envia HMAC and Asaas token hash authenticate before pause, including custo
   const f = await fixture(t, { GALATIC_ENVIA_WEBHOOK_SECRET: secret, GALATIC_PAYMENT_REFERENCE_PREFIX: "galaticcustom",
   });
   // Existing runtime config owns the hash; no new environment key is invented.
-  f.runtime.contexts.get("galatic").environment.asaasWebhookTokenHash = createHash("sha256").update("synthetic-hash-token").digest("hex");
+  f.runtime.environment.asaasWebhookTokenHash = createHash("sha256").update("synthetic-hash-token").digest("hex");
   const raw = JSON.stringify({ id: "evt_synthetic", data: { trackingNumber: "synthetic" } });
   const timestamp = String(Date.now()), event = "tracking";
   const signature = createHmac("sha256", secret).update(`${timestamp}.${event}.${raw}`).digest("hex");
@@ -150,11 +152,11 @@ test("standalone checkout, shipping and Galatic webhook factories default closed
   const store = { previewCheckout: async () => assert.fail("preview"), updateOrderFromWebhook: async () => assert.fail("webhook") };
   app.use("/checkout", createGalaticCheckoutRouter(express, { environment, store, asaasClient: {} }));
   app.use("/shipping", createGalaticShippingRouter(express, { environment, store, enviaClient: { ready: true } }));
-  app.post("/hook", createAsaasWebhookHandler({ environment, store, referencePrefix: "custom" }));
+  app.post("/hook", createAsaasWebhookHandler({ environment, store, referencePrefix: "custom", legacyGalaticAuthentication: environment }));
   const read = await serve(t, app);
   for (const path of ["/checkout/installments", "/shipping", "/hook"]) {
     const response = await read(path, { method: "POST", headers: { "content-type": "application/json", "asaas-access-token": "synthetic" }, body: "{}" });
-    assert.equal(response.status, 503); assert.equal(response.body.error, "financial_operations_paused");
+    assert.equal(response.status, 503); assert.equal(response.body.error, path === "/hook" ? "payment_profile_route_required" : "financial_operations_paused");
   }
 });
 

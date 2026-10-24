@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import { createApp } from "./application.js";
 import { createGalaticPaymentMaintenance } from "./services/galatic-payment-maintenance.js";
 
-const { app, environment, ready, stores, tenants, asaasClient, contexts, galaticNotifications } = createApp();
+const { app, environment, ready, stores, tenants, contexts, galaticNotifications } = createApp();
 const galaticContext = contexts.get("galatic");
 const paymentMaintenance = galaticContext ? createGalaticPaymentMaintenance({
-  environment: galaticContext.environment, store: galaticContext.store, asaasClient, notifications: galaticNotifications, financialGate: galaticContext.financialGate,
+  environment: galaticContext.environment, store: galaticContext.store, paymentProfiles: galaticContext.paymentProfiles, notifications: galaticNotifications, financialGate: galaticContext.financialGate,
 }) : null;
 const server = app.listen(environment.port, environment.host, () => {
   console.log(`Payments API listening on ${environment.host}:${environment.port}`, {

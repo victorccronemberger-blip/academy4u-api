@@ -1,18 +1,21 @@
+import { syntheticAction, syntheticPayment, addSyntheticOrderProof } from "./helpers/payment-profiles.mjs";
+import { createHash } from "node:crypto";
 import { createGalaticFinancialGate } from "../src/services/galatic-financial-gate.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
-import { createApp } from "../src/application.js";
+import { createApp } from "./helpers/payment-profiles.mjs";
 import { createInMemoryStore } from "../src/store/in-memory-store.js";
 import { getEnvironment } from "../src/config/environment.js";
 import { galaticPostcode } from "../src/domain/galatic-address.js";
 import { shouldApplyTracking } from "../src/domain/galatic-tracking.js";
-import { normalizeEnviaStatus, createGalaticFulfillmentService } from "../src/services/galatic-fulfillment.js";
-import { createGalaticPaymentRecovery } from "../src/services/galatic-payment-recovery.js";
+import { normalizeEnviaStatus } from "../src/services/galatic-fulfillment.js";
+import { createGalaticFulfillmentService } from "./helpers/payment-profiles.mjs";
+import { createGalaticPaymentRecovery } from "./helpers/payment-profiles.mjs";
 import { createGalaticNotificationOutbox } from "../src/services/galatic-notification-outbox.js";
 import { createAsaasClient } from "../src/integrations/asaas/client.js";
 import { createGalaticNotifications } from "../src/integrations/email/galatic-notifications.js";
-import { createGalaticPaymentMaintenance } from "../src/services/galatic-payment-maintenance.js";
+import { createGalaticPaymentMaintenance } from "./helpers/payment-profiles.mjs";
 
 const orderId = "52c02ff3-b755-4df5-90ba-20ea8c8bd035";
 const orderInput = { items: [{ sku: "TEST01", quantity: 1 }],
@@ -82,7 +85,7 @@ for (const failure of ["timeout", "attach", "complete", "invalid_response"]) tes
     releaseFailedOrder: async () => { releases += 1; },
     getOrderByPublicId: async () => current,
     getCheckoutRecovery: async () => operation,
-    getCheckoutAttemptResult: async () => ({ orderId, response: state.response }),
+    getCheckoutAttemptResult: async () => operation ? ({ orderId, fingerprint: createHash("sha256").update(JSON.stringify(orderInput)).digest("hex"), response: state.response }) : null,
   };
   const client = { findCustomersByDocument: async () => ({ data: [{ id: "cus_synthetic" }] }),
     createPayment: async (payload) => { creates += 1; if (failure === "timeout") throw Object.assign(new Error("timeout"), { code: "asaas_timeout" });
@@ -102,20 +105,20 @@ test("recovery distinguishes zero, one, conflicting and installment-group result
   const operation = { key: randomUUID(), state: "uncertain", providerCustomerId: "cus_synthetic",
     order: { id: orderId, method: "pix", installments: 1, subtotalCents: 10000, shippingCents: 2500, totalCents: 12500 },
     pricing: { baseCents: 12500, totalCents: 12500, installmentCents: 12500, feeCents: 0 } };
-  let result = { data: [] }; let attached = 0; let completed = 0;
-  const store = { getCheckoutRecovery: async () => structuredClone(operation), attachPayment: async () => { attached += 1; },
+  let result = { data: [], hasMore: false }; let attached = 0; let completed = 0;
+  const store = { updateOrderFromWebhook: async () => {}, getCheckoutRecovery: async () => structuredClone(operation), attachPayment: async () => { attached += 1; },
     getOrderByPublicId: async () => ({ status: "paid" }), completeCheckoutAttempt: async () => { completed += 1; } };
   const recover = createGalaticPaymentRecovery({ financialGate: createGalaticFinancialGate({ enabled: true }), store, asaasClient: { findPaymentsByExternalReference: async () => result,
     createPayment: async () => assert.fail("reconciliation must never create"), getPixQrCode: async () => ({}) } });
   await assert.rejects(() => recover({ key: operation.key }), { code: "payment_not_yet_found" });
   const payment = { id: "pay_synthetic", customer: "cus_synthetic", billingType: "PIX", externalReference: `galatic:${orderId}`, value: 125, status: "CONFIRMED" };
   for (const data of [[{ ...payment, value: 1 }], [{ ...payment, customer: "cus_foreign" }], [payment, { ...payment, id: "pay_duplicate" }]]) {
-    result = { data }; await assert.rejects(() => recover({ key: operation.key }), { code: "payment_reconciliation_conflict" });
+    result = { data, hasMore: false }; await assert.rejects(() => recover({ key: operation.key }), { code: "payment_reconciliation_conflict" });
   }
-  result = { data: [payment] }; assert.equal((await recover({ key: operation.key })).body.status, "paid");
+  result = { data: [payment], hasMore: false }; assert.equal((await recover({ key: operation.key })).body.status, "paid");
   assert.equal(attached, 1); assert.equal(completed, 1);
   operation.order.method = "credit_card"; operation.order.installments = 2; operation.pricing.installmentCents = 6250;
-  result = { data: [1, 2].map((number) => ({ ...payment, id: `pay_${number}`, billingType: "CREDIT_CARD", installment: "ins_synthetic", installmentNumber: number, value: 62.5 })) };
+  result = { data: [1, 2].map((number) => ({ ...payment, id: `pay_valid_${number}`, billingType: "CREDIT_CARD", installment: "ins_synthetic", installmentNumber: number, value: 62.5 })), hasMore: false };
   assert.equal((await recover({ key: operation.key })).body.installments, 2);
   assert.equal(attached, 3); assert.equal(completed, 2);
 });
@@ -127,7 +130,12 @@ test("canonical checkout CEP reaches the real label boundary and invalid address
   const store = { shipmentForOrder: async () => null, shipmentCreationContext: async () => ({ id: orderId, payment_status: "paid", service_code: "correios:pac",
     shipping_address: address, items: [{ title: "Synthetic", quantity: 1, unit_amount_cents: 10000, weight_grams: 1000, length_cm: 30, width_cm: 20, height_cm: 10 }] }),
     claimShipmentCreation: async () => { claimed += 1; return { claimed: true }; }, saveShipment: async () => ({}), completeShipmentCreation: async () => {} };
-  const fulfillment = createGalaticFulfillmentService({ financialGate: createGalaticFinancialGate({ enabled: true }), store, environment: { galaticShippingOrigin: { ...orderInput.buyer.address, postalCode: "01001000" } },
+  const snapshot = syntheticAction({ id: orderId, totalCents: 10000 });
+  const originalContext = store.shipmentCreationContext;
+  store.shipmentCreationContext = async () => ({ ...(await originalContext()), payment_profile_id: snapshot.profileId, payment_provider: "asaas",
+    payment_provider_order_id: snapshot.providerOrderId, payment_provider_group_id: null, total_cents: snapshot.totalCents });
+  const asaasClient = addSyntheticOrderProof(store, snapshot);
+  const fulfillment = createGalaticFulfillmentService({ asaasClient, financialGate: createGalaticFinancialGate({ enabled: true }), store, environment: { galaticShippingOrigin: { ...orderInput.buyer.address, postalCode: "01001000" } },
     enviaClient: { ready: true, generateLabel: async (payload) => { sent = payload; return { data: [{ trackingNumber: "SYNTHETIC" }] }; } } });
   await fulfillment.createLabel(orderId); assert.equal(sent.destination.postalCode, "01001000");
   address = { ...address, postCode: "" };
@@ -165,11 +173,12 @@ test("full installment refund uses the documented group endpoint with no partial
 
 test("refund reconciliation waits for every group installment and never reissues the refund", async () => {
   let paymentStatuses = ["REFUNDED", "CONFIRMED"]; const transitions = [];
+  const snapshot = syntheticAction({ id: orderId, providerOrderId: "pay_owned_1", providerGroupId: "ins_group", installments: 2, version: 1, providerReference: "ins_group" });
   const maintenance = createGalaticPaymentMaintenance({ financialGate: createGalaticFinancialGate({ enabled: true }), environment: { galaticPaymentMaintenanceEnabled: true,
     galaticPixReservationMinutes: 60, galaticCardReservationMinutes: 4320 },
-    store: { listExpiredPaymentReservations: async () => [], claimRefundReconciliations: async () => [{ id: orderId, providerOrderId: "pay_1", providerGroupId: "ins_group", installments: 2 }],
+    store: { listExpiredPaymentReservations: async () => [], claimRefundReconciliations: async () => [snapshot],
       recordRefundReconciliationError: async () => {}, updateOrderFromWebhook: async (value) => transitions.push(value) },
-    asaasClient: { listInstallmentPayments: async () => ({ data: paymentStatuses.map((status) => ({ status })) }),
+    asaasClient: { getPayment: async () => syntheticPayment(snapshot, paymentStatuses[0]), listInstallmentPayments: async () => ({ hasMore: false, totalCount: 2, data: paymentStatuses.map((status,i) => syntheticPayment(snapshot, status, i+1)) }),
       refundInstallment: async () => assert.fail("reconciliation must not repeat refund") } });
   await maintenance.run(); assert.equal(transitions.length, 0);
   paymentStatuses = ["REFUNDED", "REFUNDED"];

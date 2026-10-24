@@ -1,10 +1,12 @@
+import { createGalaticDeferredEventReconciliation } from "./galatic-payment-events.js";
+import { loadGalaticPaymentProof, cancelBoundGalaticPayment } from "./galatic-payment-proof.js";
 import { closedGalaticFinancialGate } from "./galatic-financial-gate.js";
 import { createGalaticNotificationOutbox } from "./galatic-notification-outbox.js";
 import { createGalaticPaymentRecovery } from "./galatic-payment-recovery.js";
-import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
 
-export function createGalaticPaymentMaintenance({ environment, store, asaasClient, notifications = null, clock = () => Date.now(), financialGate = closedGalaticFinancialGate }) {
-  const recoverPayment = store.getCheckoutRecovery ? createGalaticPaymentRecovery({ store, asaasClient, financialGate }) : null;
+export function createGalaticPaymentMaintenance({ environment, store, paymentProfiles, notifications = null, clock = () => Date.now(), financialGate = closedGalaticFinancialGate }) {
+  const reconcileDeferred = createGalaticDeferredEventReconciliation({ store, paymentProfiles, financialGate });
+  const recoverPayment = store.getCheckoutRecovery ? createGalaticPaymentRecovery({ store, paymentProfiles, financialGate }) : null;
   const processOutbox = createGalaticNotificationOutbox({ store, notifications });
   let running = false;
   let interval = null;
@@ -28,39 +30,18 @@ export function createGalaticPaymentMaintenance({ environment, store, asaasClien
         const recovered = await recoverPayment({ orderId: order.id });
         return recovered?.body?.status ?? "uncertain";
       }
-      await store.adminCancelUnpaidOrder(order.id);
+      await cancelBoundGalaticPayment({ store, paymentProfiles, order });
       await notifyCanceled(order.id);
       return "canceled";
     }
-    let payment;
-    try {
-      payment = await asaasClient.getPayment(order.providerOrderId);
-    } catch (error) {
-      if (error?.status !== 404) throw error;
-      await store.adminCancelUnpaidOrder(order.id);
-      await notifyCanceled(order.id);
-      return "canceled";
+    const proof = await loadGalaticPaymentProof({ store, paymentProfiles, order });
+    if (["paid", "refunded", "chargeback"].includes(proof.status)) {
+      await store.updateOrderFromWebhook({ profileId: proof.profileId, provider: "asaas", providerOrderId: proof.providerOrderId,
+        providerGroupId: proof.providerGroupId, status: proof.status, completeGroupProof: true });
+      return proof.status;
     }
-    const status = normalizeAsaasPaymentStatus(payment?.status);
-    if (status === "paid") {
-      await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: order.providerOrderId, status: "paid" });
-      return "paid";
-    }
-    if (["refunded", "chargeback"].includes(status)) {
-      await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: order.providerOrderId, status });
-      return status;
-    }
-    if (status !== "canceled") {
-      try {
-        if (order.providerGroupId) await asaasClient.deleteInstallment(order.providerGroupId);
-        else await asaasClient.deletePayment(order.providerOrderId);
-      } catch (error) {
-        if (error?.status !== 404) throw error;
-      }
-    }
-    await store.adminCancelUnpaidOrder(order.id);
-    await notifyCanceled(order.id);
-    return "canceled";
+    await cancelBoundGalaticPayment({ store, paymentProfiles, order });
+    await notifyCanceled(order.id); return "canceled";
   }
 
   async function run() {
@@ -69,8 +50,9 @@ export function createGalaticPaymentMaintenance({ environment, store, asaasClien
     const result = { inspected: 0, canceled: 0, paid: 0, failed: 0 };
     try {
       await processOutbox();
-      if (!financialGate.enabled || !environment.galaticPaymentMaintenanceEnabled || !asaasClient) return { ...result, skippedPayments: true };
+      if (!financialGate.enabled || !environment.galaticPaymentMaintenanceEnabled || !paymentProfiles) return { ...result, skippedPayments: true };
       return await financialGate.run(async () => {
+        await reconcileDeferred();
         if (recoverPayment && store.claimPaymentReconciliations) {
           for (const operation of await store.claimPaymentReconciliations()) {
             try { await recoverPayment({ key: operation.key }); }
@@ -85,16 +67,14 @@ export function createGalaticPaymentMaintenance({ environment, store, asaasClien
         }
         for (const refund of await store.claimRefundReconciliations?.() ?? []) {
           try {
-            const payments = refund.providerGroupId
-              ? (await asaasClient.listInstallmentPayments(refund.providerGroupId))?.data
-              : [await asaasClient.getPayment(refund.providerOrderId)];
-            if (!Array.isArray(payments) || payments.length !== refund.installments
-              || payments.some((payment) => normalizeAsaasPaymentStatus(payment.status) !== "refunded")) {
+            const proof = await loadGalaticPaymentProof({ store, paymentProfiles, order: refund, snapshot: refund, capability: "refund" });
+            if (!proof.refunded) {
               await store.recordRefundReconciliationError?.(refund.id, "refund_not_yet_confirmed", refund.version);
               continue;
             }
-            await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: refund.providerOrderId,
-              providerGroupId: refund.providerGroupId, status: "refunded" });
+            await store.updateOrderFromWebhook({ profileId: refund.profileId, provider: "asaas", providerOrderId: refund.providerOrderId,
+              providerGroupId: refund.providerGroupId, status: "refunded", completeGroupProof: true,
+              actionVersion: refund.version, actionReference: refund.providerReference });
           } catch (error) { await store.recordRefundReconciliationError?.(refund.id, error?.code ?? error?.name, refund.version); }
         }
         const now = clock();

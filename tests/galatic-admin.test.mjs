@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createApp } from "../src/application.js";
+import { syntheticAction, syntheticPayment, addSyntheticOrderProof, createApp } from "./helpers/payment-profiles.mjs";
 import { hashPassword } from "../src/domain/password.js";
 import { refundOperationView } from "../src/domain/galatic-refund-operation.js";
 
@@ -33,6 +33,7 @@ const authenticatedHeaders = (cookie, origin = "https://galatic.com.br", additio
 async function refundHttp(context, { group = false, initial = null, providerResponse, providerError = null, completeDuringRequest = false } = {}) {
   let operation = initial; let mutations = 0; let queued = 0; const alerts = [];
   const orderId = "synthetic-refund-order";
+  const snapshot = syntheticAction({ id: orderId, providerGroupId: group ? "ins_owned" : null, installments: group ? 2 : 1 });
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
     adminPaymentContext: async () => ({ id: orderId, status: "paid" }),
     adminOrder: async () => ({ order: { order_number: orderId }, refund_operation: refundOperationView(operation) }),
@@ -40,7 +41,7 @@ async function refundHttp(context, { group = false, initial = null, providerResp
     claimRefund: async () => {
       if (operation && operation.state !== "rejected") return { claimed: false, state: operation.state };
       operation = { state: "in_progress", attempt_version: (operation?.attempt_version ?? 0) + 1, error_code: null };
-      return { claimed: true, group, providerReference: group ? "ins_owned" : "pay_owned", version: operation.attempt_version };
+      return { ...snapshot, claimed: true, group, providerReference: group ? "ins_owned" : "pay_owned", version: operation.attempt_version };
     },
     finishRefundRequest: async (_id, state, error_code, version) => {
       const updated = operation.state !== "completed" && operation.attempt_version === version;
@@ -56,7 +57,8 @@ async function refundHttp(context, { group = false, initial = null, providerResp
     return providerResponse;
   };
   const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
-    { stores: { galatic: store }, asaasClient: { refundPayment: group ? async () => assert.fail("wrong scope") : mutate,
+    { stores: { galatic: store }, asaasClient: { getPayment: async () => syntheticPayment(snapshot),
+      listInstallmentPayments: async () => ({ hasMore: false, totalCount: snapshot.installments, data: [1,2].map((i) => syntheticPayment(snapshot, "CONFIRMED", i)) }), refundPayment: group ? async () => assert.fail("wrong scope") : mutate,
       refundInstallment: group ? mutate : async () => assert.fail("wrong scope") } });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
   await new Promise((resolve) => server.once("listening", resolve));
@@ -138,11 +140,11 @@ test("production label route verifies the injected production payment and report
   const orderId = "20d42dfd-9bf6-44f3-932b-625b475e324a"; let available = false; let claims = 0; let labels = 0; let stored = null;
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
     shipmentForOrder: async () => stored,
-    shipmentCreationContext: async () => ({ id: orderId, payment_status: "paid", payment_provider: "asaas",
+    shipmentCreationContext: async () => ({ payment_profile_id: "galatic-synthetic", id: orderId, payment_status: "paid", payment_provider: "asaas",
       payment_provider_order_id: "pay_synthetic_production", payment_provider_group_id: null, payment_method: "pix", installments: 1, total_cents: 12000,
       service_code: "correios:pac", shipping_address: { street: "Rua B", number: "2", district: "Centro", city: "Sao Paulo", state: "SP", postalCode: "01001000" },
       items: [{ title: "Synthetic", quantity: 1, unit_amount_cents: 12000, weight_grams: 1000, length_cm: 30, width_cm: 20, height_cm: 10 }] }),
-    getCheckoutRecovery: async () => null,
+    getCheckoutRecovery: async () => { const order = syntheticAction({ id: orderId, providerOrderId: "pay_synthetic_production", totalCents: 12000, providerCustomerId: "cus_synthetic" }); return { profileId: order.profileId, order, pricing: order.pricing, providerCustomerId: order.providerCustomerId }; },
     claimShipmentCreation: async () => { claims += 1; return { claimed: true }; },
     saveShipment: async (_orderId, value) => (stored = { order_id: orderId, tracking_code: value.trackingCode }),
     completeShipmentCreation: async () => {},
@@ -172,13 +174,14 @@ test("production label route verifies the injected production payment and report
 
 for (const installments of [2, 10]) test(`refunds the full ${installments}x group once and never resends an uncertain refund`, async (context) => {
   const calls = []; let state = null;
+  const snapshot = syntheticAction({ id: "order-refund-group", providerOrderId: "pay_first", providerGroupId: "ins_full_group", installments });
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
     adminPaymentContext: async () => ({ id: "order-refund-group", providerOrderId: "pay_first", providerGroupId: "ins_full_group", status: "paid" }),
-    claimRefund: async () => state ? { claimed: false, state } : ((state = "in_progress"), { claimed: true, group: true, providerReference: "ins_full_group", version: 1 }),
+    claimRefund: async () => state ? { claimed: false, state } : ((state = "in_progress"), { ...snapshot, claimed: true, group: true, providerReference: "ins_full_group", version: 1 }),
     finishRefundRequest: async (_orderId, next) => { state = next; return { updated: true }; },
     adminRefundOperation: async () => ({ state, attempt_version: 1, error_code: null, authorization_required: false, authorization_source: null }),
   });
-  const asaasClient = { refundPayment: async () => assert.fail("a group must not refund only its first payment"),
+  const asaasClient = { ...addSyntheticOrderProof(store, snapshot), refundPayment: async () => assert.fail("a group must not refund only its first payment"),
     refundInstallment: async (...args) => { calls.push(args); throw Object.assign(new Error("synthetic_timeout"), { code: "asaas_timeout" }); } };
   const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: store }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -428,12 +431,13 @@ test("preserves unknown product costs and validates explicit costs before store 
 
 test("cancels an unpaid Asaas charge before releasing the Galatic order", async (context) => {
   const calls = [];
+  const snapshot = syntheticAction({ id: "order-123", providerOrderId: "pay_pending_123" });
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
     adminPaymentContext: async () => ({ id: "order-123", providerOrderId: "pay_pending_123", providerGroupId: null, status: "open" }),
     adminCancelUnpaidOrder: async (id) => { calls.push(["store", id]); return true; },
   });
-  const asaasClient = {
-    getPayment: async (id) => { calls.push(["get", id]); return { status: "PENDING" }; },
+  const asaasClient = { ...addSyntheticOrderProof(store, snapshot),
+    getPayment: async (id) => { calls.push(["get", id]); return syntheticPayment(snapshot, "PENDING"); },
     deletePayment: async (id) => { calls.push(["delete", id]); return { deleted: true }; },
   };
   const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
@@ -445,19 +449,20 @@ test("cancels an unpaid Asaas charge before releasing the Galatic order", async 
   const result = await fetch(`${base}/orders/order-123/payment/cancel`, { method: "POST",
     headers: authenticatedHeaders(cookie) });
   assert.equal(result.status, 200);
-  assert.deepEqual(calls, [["get", "pay_pending_123"], ["delete", "pay_pending_123"], ["store", "order-123"]]);
+  assert.deepEqual(calls, [["get", "pay_pending_123"], ["get", "pay_pending_123"], ["delete", "pay_pending_123"], ["store", "order-123"]]);
 });
 
 test("requires the full order number before requesting an Asaas refund", async (context) => {
   let refunds = 0;
+  const snapshot = syntheticAction({ id: "order-paid-123", providerOrderId: "pay_paid_123" });
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
     adminPaymentContext: async () => ({ id: "order-paid-123", providerOrderId: "pay_paid_123", status: "paid" }),
-    claimRefund: async () => ({ claimed: true, providerReference: "pay_paid_123", group: false, version: 1 }),
+    claimRefund: async () => ({ ...snapshot, claimed: true, providerReference: "pay_paid_123", group: false, version: 1 }),
     finishRefundRequest: async () => ({ updated: true }),
     adminRefundOperation: async () => ({ state: "requested", attempt_version: 1, error_code: null, authorization_required: false, authorization_source: null }),
     recordOperationalAlert: async () => {},
   });
-  const asaasClient = { refundPayment: async () => { refunds += 1; } };
+  const asaasClient = { ...addSyntheticOrderProof(store, snapshot), refundPayment: async () => { refunds += 1; } };
   const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic",
     GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", GALATIC_DATABASE_URL: "mysql://galatic:test@127.0.0.1/galatic" },
   { stores: { galatic: store }, asaasClient });
