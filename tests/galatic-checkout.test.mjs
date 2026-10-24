@@ -29,7 +29,7 @@ test("previews all Galatic card installments with the live Asaas fee table", asy
     operationValue: 0.49, oneInstallmentPercentage: 2.99,
     upToSixInstallmentsPercentage: 3.49, upToTwelveInstallmentsPercentage: 4.49,
   } } }) };
-  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
     PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
   { stores: { galatic: galaticStore }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -63,7 +63,7 @@ test("creates a server-priced Galatic Pix order with a project-scoped reference"
     updatePayment: async () => ({ id: "pay_galatic_1", status: "PENDING" }),
     getPixQrCode: async () => ({ encodedImage: "aW1hZ2U=", payload: "000201GALATIC", expirationDate: "2026-08-15" }),
   };
-  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
     PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
     GALATIC_SUCCESS_ORIGIN: "https://galatic.com.br" }, { stores: { galatic: galaticStore }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -94,7 +94,7 @@ test("creates an embedded Galatic card order in up to 10x and passes through the
     } } }),
     createPayment: async (payload) => { calls.push(payload); return { ...payload, value: payload.totalValue / payload.installmentCount, id: "pay_galatic_card", installment: "ins_galatic_card", status: "CONFIRMED" }; },
   };
-  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
     PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
   { stores: { galatic: galaticStore }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -122,7 +122,7 @@ test("creates a Galatic card order in 1x without charging the Asaas fee to the c
     simulatePayment: async () => assert.fail("1x interest-free must not request a customer fee"),
     createPayment: async (payload) => { calls.push(payload); return { ...payload, id: "pay_galatic_card_1x", status: "CONFIRMED" }; },
   };
-  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
     PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
   { stores: { galatic: galaticStore }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -150,7 +150,7 @@ test("rejects every forbidden Galatic payment method and card plans above 10x be
     createCustomer: async () => { providerCalls += 1; return { id: "unexpected" }; },
     createPayment: async () => { providerCalls += 1; return { id: "unexpected" }; },
   };
-  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
     PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
   { stores: { galatic: galaticStore }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
@@ -182,7 +182,7 @@ test("rejects quantities above three and duplicate SKU aggregation before touchi
     findCustomersByDocument: async () => { providerCalls += 1; return { data: [] }; },
     createCustomer: async () => { providerCalls += 1; return { id: "unexpected" }; },
   };
-  const { app } = createApp({ ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
+  const { app } = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_test",
     PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
   { stores: { galatic: galaticStore }, asaasClient });
   const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());

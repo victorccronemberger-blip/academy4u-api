@@ -1,3 +1,4 @@
+import { closedGalaticFinancialGate } from "./galatic-financial-gate.js";
 import { galaticPostcode, assertShippingAddress } from "../domain/galatic-address.js";
 import { matchesGalaticPayment } from "../domain/galatic-payment.js";
 import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
@@ -30,7 +31,7 @@ function shipmentView(row) {
     currency: row.currency, created_at: row.created_at };
 }
 
-export function createGalaticFulfillmentService({ environment, store, enviaClient, asaasClient = null, notifications = null }) {
+export function createGalaticFulfillmentService({ environment, store, enviaClient, asaasClient = null, notifications = null, financialGate = closedGalaticFinancialGate }) {
   async function verifyProductionPayment(order) {
     if (environment.galaticEnviaEnvironment !== "production") return;
     const unverified = () => Object.assign(new Error("shipping_payment_unverified"), { code: "shipping_payment_unverified" });
@@ -130,6 +131,7 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
       const data = Array.isArray(result?.data) ? result.data[0] : result?.data;
       trackingCode = text(data?.trackingNumber, 100);
       if (!trackingCode) throw Object.assign(new Error("envia_invalid_label_response"), { code: "envia_invalid_label_response" });
+      financialGate.assertEnabled();
       stored = await store.saveShipment(order.id, { providerShipmentId: text(data?.shipmentId, 100) || null,
         carrier: text(data?.carrier ?? selected.carrier, 60), service: text(data?.service ?? selected.service, 100), trackingCode,
         labelUrl: text(data?.label, 1500) || null, trackUrl: text(data?.trackUrl, 1500) || null,
@@ -159,6 +161,7 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
     const status = normalizeEnviaStatus(data?.status);
     const eventId = `poll:${shipment.tracking_code}:${text(data?.status, 80)}:${text(data?.events?.[0]?.timestamp, 80)}`;
     const description = text(data?.events?.[0]?.description ?? data?.status, 500);
+    financialGate.assertEnabled();
     const updated = await store.updateShipmentFromEvent({ eventId,
       eventType: "tracking.poll", trackingCode: shipment.tracking_code, status,
       description, occurredAt: data?.events?.[0]?.timestamp ?? null });
@@ -173,13 +176,16 @@ export function createGalaticFulfillmentService({ environment, store, enviaClien
     if (shipment.canceled_at) return { canceled: true, shipment: shipmentView(shipment) };
     const result = await enviaClient.cancel({ carrier: shipment.carrier, trackingNumber: shipment.tracking_code });
     const description = result?.data?.balanceReturned ? "Etiqueta cancelada; saldo devolvido pela Envia." : "Cancelamento da etiqueta solicitado à Envia.";
+    financialGate.assertEnabled();
     await store.cancelShipment(orderId, description);
     await notifyShipping(orderId, `shipping:shipment_canceled:${orderId}`, "shipment_canceled",
       shipment.tracking_code, description);
     return { canceled: true, balance_returned: Boolean(result?.data?.balanceReturned), shipment: shipmentView(await store.shipmentForOrder(orderId)) };
   }
 
-  return { createLabel, refresh, cancel };
+  return Object.freeze({ createLabel: (...args) => financialGate.run(() => createLabel(...args)),
+    refresh: (...args) => financialGate.run(() => refresh(...args)),
+    cancel: (...args) => financialGate.run(() => cancel(...args)) });
 }
 
 export function normalizeEnviaStatus(value) {

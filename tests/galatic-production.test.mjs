@@ -1,3 +1,4 @@
+import { createGalaticFinancialGate } from "../src/services/galatic-financial-gate.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
@@ -18,7 +19,7 @@ const orderInput = { items: [{ sku: "TEST01", quantity: 1 }],
   buyer: { firstName: "Synthetic", lastName: "Buyer", email: "guest@example.test", phone: "11999999999", documentNumber: "52998224725",
     address: { postCode: "01001000", street: "Synthetic Street", number: "1", district: "Centro", city: "Sao Paulo", state: "SP" } },
   shipping: { quoteId: "93b448ca-3dcc-43cd-9d14-02e14745695f" }, payment: { method: "pix" } };
-const source = { PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
+const source = { GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
   ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox", ASAAS_SANDBOX: "$aact_synthetic", ASAAS_SANDBOX_WEBHOOK_TOKEN: "synthetic-webhook" };
 
 async function listen(t, runtime) {
@@ -32,7 +33,7 @@ test("Galatic opening gate requires deliberate production enablement and preserv
   assert.equal(getEnvironment({ NODE_ENV: "production", ASAAS_ENABLED: "true", ASAAS_SANDBOX: "synthetic" }).galaticSalesEnabled, false);
   assert.equal(getEnvironment({ NODE_ENV: "production", GALATIC_SALES_ENABLED: "true" }).galaticSalesEnabled, true);
   const store = { ...createInMemoryStore(), getOrderByPublicId: async () => ({ id: orderId, status: "paid" }) };
-  const runtime = createApp({ ...source, GALATIC_SALES_ENABLED: "false" }, { stores: { galatic: store }, asaasClient: {} });
+  const runtime = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", ...source, GALATIC_SALES_ENABLED: "false" }, { stores: { galatic: store }, asaasClient: {} });
   await runtime.ready; const base = await listen(t, runtime);
   const status = await (await fetch(`${base}/v1/galatic/checkout/status`)).json();
   assert.equal(status.enabled, false); assert.equal(status.salesEnabled, false); assert.equal(status.reason, "store_not_open");
@@ -44,7 +45,7 @@ test("Galatic opening gate requires deliberate production enablement and preserv
 for (const failedTenant of ["academy4u", "galatic"]) test(`a failed ${failedTenant} database cannot disable the other tenant`, async (t) => {
   const stores = { academy4u: createInMemoryStore(), galatic: createInMemoryStore() };
   stores[failedTenant].ensureSchema = async () => { throw new Error("synthetic_database_down"); };
-  const runtime = createApp({ PAYMENT_TENANTS: "academy4u,galatic", NODE_ENV: "development",
+  const runtime = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", PAYMENT_TENANTS: "academy4u,galatic", NODE_ENV: "development",
     ACADEMY4U_PUBLIC_ORIGIN: "https://academy4u.com.br", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" }, { stores });
   await assert.rejects(runtime.ready);
   assert.equal(runtime.contexts.get(failedTenant).readiness.status, "error");
@@ -59,7 +60,7 @@ for (const failedTenant of ["academy4u", "galatic"]) test(`a failed ${failedTena
 test("missing Galatic production encryption key fails only its readiness before schema or writes", async () => {
   const galatic = createInMemoryStore(); let schemaCalls = 0;
   galatic.ensureSchema = async () => { schemaCalls += 1; };
-  const runtime = createApp({ NODE_ENV: "production", PAYMENT_TENANTS: "academy4u,galatic",
+  const runtime = createApp({ GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", NODE_ENV: "production", PAYMENT_TENANTS: "academy4u,galatic",
     ACADEMY4U_PUBLIC_ORIGIN: "https://academy4u.com.br", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br",
     ACADEMY4U_MYSQL_URL: "mysql://synthetic-academy", GALATIC_MYSQL_URL: "mysql://synthetic-galatic" },
     { stores: { academy4u: createInMemoryStore(), galatic } });
@@ -104,7 +105,7 @@ test("recovery distinguishes zero, one, conflicting and installment-group result
   let result = { data: [] }; let attached = 0; let completed = 0;
   const store = { getCheckoutRecovery: async () => structuredClone(operation), attachPayment: async () => { attached += 1; },
     getOrderByPublicId: async () => ({ status: "paid" }), completeCheckoutAttempt: async () => { completed += 1; } };
-  const recover = createGalaticPaymentRecovery({ store, asaasClient: { findPaymentsByExternalReference: async () => result,
+  const recover = createGalaticPaymentRecovery({ financialGate: createGalaticFinancialGate({ enabled: true }), store, asaasClient: { findPaymentsByExternalReference: async () => result,
     createPayment: async () => assert.fail("reconciliation must never create"), getPixQrCode: async () => ({}) } });
   await assert.rejects(() => recover({ key: operation.key }), { code: "payment_not_yet_found" });
   const payment = { id: "pay_synthetic", customer: "cus_synthetic", billingType: "PIX", externalReference: `galatic:${orderId}`, value: 125, status: "CONFIRMED" };
@@ -126,7 +127,7 @@ test("canonical checkout CEP reaches the real label boundary and invalid address
   const store = { shipmentForOrder: async () => null, shipmentCreationContext: async () => ({ id: orderId, payment_status: "paid", service_code: "correios:pac",
     shipping_address: address, items: [{ title: "Synthetic", quantity: 1, unit_amount_cents: 10000, weight_grams: 1000, length_cm: 30, width_cm: 20, height_cm: 10 }] }),
     claimShipmentCreation: async () => { claimed += 1; return { claimed: true }; }, saveShipment: async () => ({}), completeShipmentCreation: async () => {} };
-  const fulfillment = createGalaticFulfillmentService({ store, environment: { galaticShippingOrigin: { ...orderInput.buyer.address, postalCode: "01001000" } },
+  const fulfillment = createGalaticFulfillmentService({ financialGate: createGalaticFinancialGate({ enabled: true }), store, environment: { galaticShippingOrigin: { ...orderInput.buyer.address, postalCode: "01001000" } },
     enviaClient: { ready: true, generateLabel: async (payload) => { sent = payload; return { data: [{ trackingNumber: "SYNTHETIC" }] }; } } });
   await fulfillment.createLabel(orderId); assert.equal(sent.destination.postalCode, "01001000");
   address = { ...address, postCode: "" };
@@ -164,7 +165,7 @@ test("full installment refund uses the documented group endpoint with no partial
 
 test("refund reconciliation waits for every group installment and never reissues the refund", async () => {
   let paymentStatuses = ["REFUNDED", "CONFIRMED"]; const transitions = [];
-  const maintenance = createGalaticPaymentMaintenance({ environment: { galaticPaymentMaintenanceEnabled: true,
+  const maintenance = createGalaticPaymentMaintenance({ financialGate: createGalaticFinancialGate({ enabled: true }), environment: { galaticPaymentMaintenanceEnabled: true,
     galaticPixReservationMinutes: 60, galaticCardReservationMinutes: 4320 },
     store: { listExpiredPaymentReservations: async () => [], claimRefundReconciliations: async () => [{ id: orderId, providerOrderId: "pay_1", providerGroupId: "ins_group", installments: 2 }],
       recordRefundReconciliationError: async () => {}, updateOrderFromWebhook: async (value) => transitions.push(value) },
@@ -176,7 +177,7 @@ test("refund reconciliation waits for every group installment and never reissues
 });
 
 test("email footer identifies the brand and preopening without the closed CNPJ", () => {
-  const source = { GALATIC_MAIL_API_TOKEN: "synthetic", GALATIC_MAIL_API_MAILBOX_ID: "synthetic-mailbox" };
+  const source = { GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", GALATIC_MAIL_API_TOKEN: "synthetic", GALATIC_MAIL_API_MAILBOX_ID: "synthetic-mailbox" };
   const html = createGalaticNotifications(source).previewCustom({ subject: "Synthetic", message: "Synthetic" });
   assert.match(html, /galatic\.com\.br/); assert.match(html, /prepara/);
   assert.doesNotMatch(html, /67\.956\.916\/0001-90|CNPJ/);

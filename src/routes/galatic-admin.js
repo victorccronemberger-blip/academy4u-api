@@ -1,3 +1,4 @@
+import { closedGalaticFinancialGate, financialRoute } from "../services/galatic-financial-gate.js";
 import { createGalaticPaymentRecovery } from "../services/galatic-payment-recovery.js";
 import { hashPassword, normalizeEmail, opaqueToken, tokenHash, verifyPassword } from "../domain/password.js";
 import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
@@ -90,6 +91,7 @@ function couponInput(body) {
 }
 
 export function createGalaticAdminRouter(express, { environment, store, notifications = null, fulfillment = null, asaasClient = null,
+  financialGate = closedGalaticFinancialGate,
   botChallenge = { verify: (_request, _response, next) => next() } }) {
   const router = express.Router();
   const consume = store.consumeRateLimit?.bind(store);
@@ -160,6 +162,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   });
 
   router.use(authenticate);
+  router.get("/runtime", requireOwner, (_request, response) => response.json(financialGate.diagnostics()));
   router.get("/dashboard", async (_request, response) => response.json({ metrics: await store.adminDashboard() }));
   router.get("/products", async (request, response) => {
     const paged = ["page", "per_page", "q", "category", "status"].some((key) => request.query[key] !== undefined);
@@ -232,17 +235,17 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
   router.get("/orders/:id", async (request, response) => {
     const result = await store.adminOrder(request.params.id); return result ? response.json(result) : response.status(404).json({ error: "order_not_found" });
   });
-  router.post("/orders/:id/payment/reconcile", requireOwner, allowBodyFields([]), async (request, response) => {
+  financialRoute(router, financialGate, "post", "/orders/:id/payment/reconcile", requireOwner, financialGate.middleware, allowBodyFields([]), async (request, response) => {
     if (!asaasClient || !store.getCheckoutRecovery) return response.status(503).json({ error: "payment_unavailable" });
     try {
-      const result = await createGalaticPaymentRecovery({ store, asaasClient })({ orderId: request.params.id });
+      const result = await createGalaticPaymentRecovery({ store, asaasClient, financialGate })({ orderId: request.params.id });
       if (!result) return response.status(409).json({ error: "payment_reconciliation_not_pending" });
       await store.recordOperationalAlert?.({ type: "payment_reconciled", source: "galatic-admin", severity: "info",
         summary: "Tentativa conciliada com o provedor.", context: { orderId: request.params.id, adminId: request.galaticAdmin.id } });
       return response.json(result.body);
     } catch (error) { return response.status(409).json({ error: error?.code ?? "payment_reconciliation_pending" }); }
   });
-  router.post("/orders/:id/payment/cancel", requireOwner, allowBodyFields([]), async (request, response) => {
+  financialRoute(router, financialGate, "post", "/orders/:id/payment/cancel", requireOwner, financialGate.middleware, allowBodyFields([]), async (request, response) => {
     if (!asaasClient) return response.status(503).json({ error: "payment_unavailable" });
     const order = await store.adminPaymentContext(request.params.id);
     if (!order) return response.status(404).json({ error: "order_not_found" });
@@ -271,7 +274,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       });
     }
   });
-  router.post("/orders/:id/payment/refund", requireOwner, allowBodyFields(["confirmation"]), async (request, response) => {
+  financialRoute(router, financialGate, "post", "/orders/:id/payment/refund", requireOwner, financialGate.middleware, allowBodyFields(["confirmation"]), async (request, response) => {
     if (!asaasClient) return response.status(503).json({ error: "payment_unavailable" });
     const order = await store.adminPaymentContext(request.params.id);
     if (!order) return response.status(404).json({ error: "order_not_found" });
@@ -315,7 +318,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     }
   });
 
-  router.post("/orders/:id/shipping/manual-dispatch", allowBodyFields(["tracking_code"]), async (request, response) => {
+  financialRoute(router, financialGate, "post", "/orders/:id/shipping/manual-dispatch", financialGate.middleware, allowBodyFields(["tracking_code"]), async (request, response) => {
     const tracking = clean(request.body?.tracking_code, 100);
     if (!/^[A-Za-z0-9._\-/]{5,100}$/.test(tracking)) return response.status(400).json({ error: "invalid_tracking" });
     const updated = await store.adminUpdateShipping(request.params.id, { status: "posted", trackingCode: tracking, description: "Pedido postado." });
@@ -323,7 +326,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       { status: "posted", trackingCode: tracking, description: "Pedido postado." });
     return updated ? response.json({ updated: true, tracking_code: tracking }) : response.status(409).json({ error: "order_not_paid" });
   });
-  router.post("/orders/:id/shipping/manual-status", allowBodyFields(["shipping_status", "description"]), async (request, response) => {
+  financialRoute(router, financialGate, "post", "/orders/:id/shipping/manual-status", financialGate.middleware, allowBodyFields(["shipping_status", "description"]), async (request, response) => {
     const status = clean(request.body?.shipping_status, 32);
     if (!["in_transit", "out_for_delivery", "delivered", "delivery_exception", "returned"].includes(status)) return response.status(400).json({ error: "invalid_shipping_status" });
     const description = clean(request.body?.description, 500);
@@ -332,7 +335,7 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
       { status, description });
     return updated ? response.json({ updated: true, status }) : response.status(409).json({ error: "order_not_paid" });
   });
-  router.post("/orders/:id/shipping/label", allowBodyFields([]), async (request, response) => {
+  financialRoute(router, financialGate, "post", "/orders/:id/shipping/label", financialGate.middleware, allowBodyFields([]), async (request, response) => {
     if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
     try { const result = await fulfillment.createLabel(request.params.id); return response.status(result.created ? 201 : 200).json(result); }
     catch (error) {
@@ -343,12 +346,12 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
         : "Não foi possível gerar a etiqueta de envio." });
     }
   });
-  router.post("/orders/:id/shipping/refresh", allowBodyFields([]), async (request, response) => {
+  financialRoute(router, financialGate, "post", "/orders/:id/shipping/refresh", financialGate.middleware, allowBodyFields([]), async (request, response) => {
     if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
     try { return response.json({ shipment: await fulfillment.refresh(request.params.id) }); }
     catch (error) { return response.status(error?.code === "shipment_not_found" ? 404 : 502).json({ error: error?.code ?? "tracking_failed" }); }
   });
-  router.post("/orders/:id/shipping/cancel", allowBodyFields([]), async (request, response) => {
+  financialRoute(router, financialGate, "post", "/orders/:id/shipping/cancel", financialGate.middleware, allowBodyFields([]), async (request, response) => {
     if (!fulfillment) return response.status(503).json({ error: "shipping_unavailable" });
     try { return response.json(await fulfillment.cancel(request.params.id)); }
     catch (error) { return response.status(error?.code === "shipment_not_found" ? 404 : 502).json({ error: error?.code ?? "shipment_cancel_failed" }); }
@@ -460,6 +463,9 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     return response.json({
       scope: "technical_configuration",
       configuration_ready: configurationReady,
+      financial_operations_enabled: financialGate.enabled,
+      operational_pause: !financialGate.enabled,
+      operational_checks: [{ key: "financial_operations", passed: financialGate.enabled }],
       production_ready: configurationReady, // Legacy alias: configuration only, never commercial approval.
       sandbox_ready: sandboxReady,
       payment_environment: environment.asaasEnvironment,

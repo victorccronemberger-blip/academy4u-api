@@ -5,7 +5,7 @@ import { createAsaasClient } from "../src/integrations/asaas/client.js";
 import { createInMemoryStore } from "../src/store/in-memory-store.js";
 
 const providerOrderId = "pay_synthetic_read";
-const source = { PAYMENT_TENANTS: "academy4u,galatic", ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox",
+const source = { GALATIC_FINANCIAL_OPERATIONS_ENABLED: "true", PAYMENT_TENANTS: "academy4u,galatic", ASAAS_ENABLED: "true", ASAAS_ENVIRONMENT: "sandbox",
   ASAAS_SANDBOX: "synthetic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br", ACADEMY4U_PUBLIC_ORIGIN: "https://academy4u.com.br" };
 const qr = { encodedImage: "aW1hZ2U=", payload: "SYNTHETIC-QR", expirationDate: "2030-01-01" };
 

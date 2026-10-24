@@ -1,3 +1,4 @@
+import { createGalaticFinancialGate } from "../src/services/galatic-financial-gate.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createGalaticPaymentMaintenance } from "../src/services/galatic-payment-maintenance.js";
@@ -17,7 +18,7 @@ test("cancels stale unpaid charges at Asaas before releasing their stock", async
     getPayment: async (id) => { calls.push(["read", id]); return { status: "PENDING" }; },
     deletePayment: async (id) => { calls.push(["delete", id]); return { deleted: true }; },
   };
-  const maintenance = createGalaticPaymentMaintenance({ environment: environment(), store, asaasClient, clock: () => 1_800_000_000_000 });
+  const maintenance = createGalaticPaymentMaintenance({ financialGate: createGalaticFinancialGate({ enabled: true }), environment: environment(), store, asaasClient, clock: () => 1_800_000_000_000 });
   assert.deepEqual(await maintenance.run(), { inspected: 1, canceled: 1, paid: 0, failed: 0 });
   assert.deepEqual(calls, [["read", "pay-pix"], ["delete", "pay-pix"], ["cancel-local", "order-pix"]]);
 });
@@ -33,7 +34,7 @@ test("never cancels a stale local reservation when Asaas already received paymen
     getPayment: async () => ({ status: "CONFIRMED" }),
     deletePayment: async () => { throw new Error("must not delete paid charge"); },
   };
-  const maintenance = createGalaticPaymentMaintenance({ environment: environment(), store, asaasClient });
+  const maintenance = createGalaticPaymentMaintenance({ financialGate: createGalaticFinancialGate({ enabled: true }), environment: environment(), store, asaasClient });
   assert.deepEqual(await maintenance.run(), { inspected: 1, canceled: 0, paid: 1, failed: 0 });
   assert.deepEqual(calls, [["paid-local", "pay-paid"]]);
 });
@@ -48,7 +49,7 @@ test("removes the full Asaas installment group for an abandoned card order", asy
     getPayment: async () => ({ status: "PENDING" }),
     deleteInstallment: async (id) => { removed = id; },
   };
-  const maintenance = createGalaticPaymentMaintenance({ environment: environment(), store, asaasClient });
+  const maintenance = createGalaticPaymentMaintenance({ financialGate: createGalaticFinancialGate({ enabled: true }), environment: environment(), store, asaasClient });
   assert.equal((await maintenance.run()).canceled, 1);
   assert.equal(removed, "ins-card");
 });
@@ -65,7 +66,7 @@ test("inconclusive refund polling passes its attempt version without treating re
     if (failRead) throw Object.assign(new Error("synthetic"), { code: "read_unavailable" });
     return { id: "pay_owned", status: "RECEIVED", refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION" }, { status: "DONE" }] };
   }, refundPayment: async () => assert.fail("maintenance must not mutate a refund") };
-  const maintenance = createGalaticPaymentMaintenance({ environment: environment(), store, asaasClient });
+  const maintenance = createGalaticPaymentMaintenance({ financialGate: createGalaticFinancialGate({ enabled: true }), environment: environment(), store, asaasClient });
   await maintenance.run(); failRead = true; await maintenance.run();
   assert.deepEqual(errors, [["order-refund", "refund_not_yet_confirmed", 7], ["order-refund", "read_unavailable", 7]]);
   assert.deepEqual(updates, []);
