@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createApp } from "../src/application.js";
 import { hashPassword } from "../src/domain/password.js";
+import { refundOperationView } from "../src/domain/galatic-refund-operation.js";
 
 function adminStore(passwordHash, additions = {}) {
   const sessions = new Set();
@@ -28,6 +29,110 @@ async function login(server, password = "StrongAdminPassword!42") {
 }
 
 const authenticatedHeaders = (cookie, origin = "https://galatic.com.br", additions = {}) => ({ origin, cookie, ...additions });
+
+async function refundHttp(context, { group = false, initial = null, providerResponse, providerError = null, completeDuringRequest = false } = {}) {
+  let operation = initial; let mutations = 0; let queued = 0; const alerts = [];
+  const orderId = "synthetic-refund-order";
+  const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
+    adminPaymentContext: async () => ({ id: orderId, status: "paid" }),
+    adminOrder: async () => ({ order: { order_number: orderId }, refund_operation: refundOperationView(operation) }),
+    adminRefundOperation: async () => refundOperationView(operation),
+    claimRefund: async () => {
+      if (operation && operation.state !== "rejected") return { claimed: false, state: operation.state };
+      operation = { state: "in_progress", attempt_version: (operation?.attempt_version ?? 0) + 1, error_code: null };
+      return { claimed: true, group, providerReference: group ? "ins_owned" : "pay_owned", version: operation.attempt_version };
+    },
+    finishRefundRequest: async (_id, state, error_code, version) => {
+      const updated = operation.state !== "completed" && operation.attempt_version === version;
+      if (updated) { operation = { state, error_code, attempt_version: version }; if (state === "requested") queued += 1; }
+      return { updated, operation: refundOperationView(operation) };
+    },
+    recordOperationalAlert: async (alert) => { alerts.push(alert); },
+  });
+  const mutate = async () => {
+    mutations += 1;
+    if (completeDuringRequest) operation = { ...operation, state: "completed", error_code: null };
+    if (providerError) throw providerError;
+    return providerResponse;
+  };
+  const { app } = createApp({ ASAAS_ENABLED: "false", PAYMENT_TENANTS: "galatic", GALATIC_PUBLIC_ORIGIN: "https://galatic.com.br" },
+    { stores: { galatic: store }, asaasClient: { refundPayment: group ? async () => assert.fail("wrong scope") : mutate,
+      refundInstallment: group ? mutate : async () => assert.fail("wrong scope") } });
+  const server = app.listen(0, "127.0.0.1"); context.after(() => server.close());
+  await new Promise((resolve) => server.once("listening", resolve));
+  const { base, cookie } = await login(server);
+  return {
+    post: () => fetch(`${base}/orders/${orderId}/payment/refund`, { method: "POST",
+      headers: authenticatedHeaders(cookie, undefined, { "content-type": "application/json" }), body: JSON.stringify({ confirmation: orderId }) }),
+    reload: async () => (await fetch(`${base}/orders/${orderId}`, { headers: authenticatedHeaders(cookie) })).json(),
+    snapshot: () => ({ operation, mutations, queued, alerts }),
+  };
+}
+
+for (const group of [false, true]) test(`owned ${group ? "installment" : "payment"} authorization response persists for reload and never repeats the mutation`, async (context) => {
+  const journey = await refundHttp(context, { group, providerResponse: { id: group ? "ins_owned" : "pay_owned",
+    refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION" }] } });
+  const first = await journey.post(); assert.equal(first.status, 202);
+  const body = await first.json();
+  assert.deepEqual(body.refund_operation, { state: "requested", attempt_version: 1, error_code: "refund_authorization_required",
+    authorization_required: true, authorization_source: "refund_request_response" });
+  assert.equal(body.completed, false); assert.equal(body.requested, true);
+  assert.deepEqual((await journey.reload()).refund_operation, body.refund_operation);
+  assert.deepEqual((await (await journey.post()).json()).refund_operation, body.refund_operation);
+  assert.equal(journey.snapshot().mutations, 1); assert.equal(journey.snapshot().queued, 1);
+  assert.equal(journey.snapshot().alerts[0].type, "refund_authorization_required");
+});
+
+test("foreign, missing, malformed and unknown refund payloads cannot assert operator authorization", async (context) => {
+  for (const providerResponse of [undefined, { id: "pay_foreign", refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION" }] },
+    { id: "pay_owned", refunds: [null] }, { id: "pay_owned", refunds: ["AWAITING_CRITICAL_ACTION_AUTHORIZATION"] },
+    { id: "pay_owned", refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION" }, { status: "FUTURE_STATE" }] },
+    { id: "pay_owned", refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION" }, { status: "PENDING" }] },
+    { refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION" }] },
+    { id: "pay_owned", refunds: [{ status: "DONE" }] }, { id: "pay_owned", refunds: [] }]) {
+    await context.test(JSON.stringify(providerResponse) ?? "missing", async (child) => {
+      const journey = await refundHttp(child, { providerResponse });
+      const body = await (await journey.post()).json();
+      assert.equal(body.state, "requested"); assert.equal(body.refund_operation.authorization_required, false);
+      assert.equal(body.refund_operation.error_code, null); assert.equal(body.completed, false);
+    });
+  }
+});
+
+test("a single old partial critical entry is only an indication in the related payment response", async (context) => {
+  const journey = await refundHttp(context, { providerResponse: { id: "pay_owned", status: "RECEIVED", value: 150,
+    refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION", value: 10, dateCreated: "2020-01-01" }] } });
+  const body = await (await journey.post()).json();
+  assert.equal(body.state, "requested"); assert.equal(body.completed, false);
+  assert.equal(body.refund_operation.authorization_required, true);
+  assert.equal(body.refund_operation.authorization_source, "refund_request_response");
+  assert.equal(body.message, "Na resposta à solicitação, o Asaas indicou um estorno pendente de autorização no pagamento ou parcelamento relacionado. Verifique os detalhes no painel Asaas.");
+  assert.equal(journey.snapshot().alerts[0].summary, body.message);
+});
+
+for (const state of ["requested", "in_progress", "uncertain", "completed"]) test(`existing ${state} operation is canonical and never resubmitted`, async (context) => {
+  const journey = await refundHttp(context, { initial: { state, attempt_version: 3, error_code: null } });
+  const body = await (await journey.post()).json();
+  assert.equal(body.state, state); assert.equal(body.completed, state === "completed");
+  assert.equal(body.reconciliation_pending, ["in_progress", "uncertain"].includes(state));
+  assert.equal(journey.snapshot().mutations, 0); assert.equal(journey.snapshot().alerts.length, 0);
+});
+
+test("only an explicitly rejected operation may claim a new version", async (context) => {
+  const journey = await refundHttp(context, { initial: { state: "rejected", attempt_version: 3, error_code: "synthetic_rejection" } });
+  assert.equal((await (await journey.post()).json()).refund_operation.attempt_version, 4);
+  assert.equal(journey.snapshot().mutations, 1);
+});
+
+for (const providerError of [null, Object.assign(new Error("synthetic_timeout"), { code: "asaas_timeout" }),
+  Object.assign(new Error("synthetic_rejected"), { status: 422 })]) test(`completion during SDK POST wins over ${providerError?.message ?? "authorization response"}`, async (context) => {
+  const journey = await refundHttp(context, { completeDuringRequest: true, providerError,
+    providerResponse: { id: "pay_owned", refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION" }] } });
+  const result = await journey.post(); assert.equal(result.status, 202);
+  const body = await result.json(); assert.equal(body.state, "completed"); assert.equal(body.completed, true);
+  assert.equal(body.requested, false); assert.equal(body.refund_operation.authorization_required, false);
+  assert.equal(journey.snapshot().queued, 0); assert.equal(journey.snapshot().alerts.length, 0);
+});
 
 test("production label route verifies the injected production payment and reports an unverified order as 409", async (context) => {
   const orderId = "20d42dfd-9bf6-44f3-932b-625b475e324a"; let available = false; let claims = 0; let labels = 0; let stored = null;
@@ -69,8 +174,9 @@ for (const installments of [2, 10]) test(`refunds the full ${installments}x grou
   const calls = []; let state = null;
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
     adminPaymentContext: async () => ({ id: "order-refund-group", providerOrderId: "pay_first", providerGroupId: "ins_full_group", status: "paid" }),
-    claimRefund: async () => state ? { claimed: false, state } : ((state = "in_progress"), { claimed: true, group: true, providerReference: "ins_full_group" }),
-    finishRefundRequest: async (_orderId, next) => { state = next; },
+    claimRefund: async () => state ? { claimed: false, state } : ((state = "in_progress"), { claimed: true, group: true, providerReference: "ins_full_group", version: 1 }),
+    finishRefundRequest: async (_orderId, next) => { state = next; return { updated: true }; },
+    adminRefundOperation: async () => ({ state, attempt_version: 1, error_code: null, authorization_required: false, authorization_source: null }),
   });
   const asaasClient = { refundPayment: async () => assert.fail("a group must not refund only its first payment"),
     refundInstallment: async (...args) => { calls.push(args); throw Object.assign(new Error("synthetic_timeout"), { code: "asaas_timeout" }); } };
@@ -346,8 +452,9 @@ test("requires the full order number before requesting an Asaas refund", async (
   let refunds = 0;
   const store = adminStore(await hashPassword("StrongAdminPassword!42"), {
     adminPaymentContext: async () => ({ id: "order-paid-123", providerOrderId: "pay_paid_123", status: "paid" }),
-    claimRefund: async () => ({ claimed: true, providerReference: "pay_paid_123", group: false }),
-    finishRefundRequest: async () => {},
+    claimRefund: async () => ({ claimed: true, providerReference: "pay_paid_123", group: false, version: 1 }),
+    finishRefundRequest: async () => ({ updated: true }),
+    adminRefundOperation: async () => ({ state: "requested", attempt_version: 1, error_code: null, authorization_required: false, authorization_source: null }),
     recordOperationalAlert: async () => {},
   });
   const asaasClient = { refundPayment: async () => { refunds += 1; } };

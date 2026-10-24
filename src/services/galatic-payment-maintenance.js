@@ -88,12 +88,12 @@ export function createGalaticPaymentMaintenance({ environment, store, asaasClien
             : [await asaasClient.getPayment(refund.providerOrderId)];
           if (!Array.isArray(payments) || payments.length !== refund.installments
             || payments.some((payment) => normalizeAsaasPaymentStatus(payment.status) !== "refunded")) {
-            await store.recordRefundReconciliationError?.(refund.id, "refund_not_yet_confirmed");
+            await store.recordRefundReconciliationError?.(refund.id, "refund_not_yet_confirmed", refund.version);
             continue;
           }
           await store.updateOrderFromWebhook({ provider: "asaas", providerOrderId: refund.providerOrderId,
             providerGroupId: refund.providerGroupId, status: "refunded" });
-        } catch (error) { await store.recordRefundReconciliationError?.(refund.id, error?.code ?? error?.name); }
+        } catch (error) { await store.recordRefundReconciliationError?.(refund.id, error?.code ?? error?.name, refund.version); }
       }
       const now = clock();
       const orders = await store.listExpiredPaymentReservations({

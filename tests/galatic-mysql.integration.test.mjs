@@ -6,6 +6,7 @@ import { createGalaticMySqlStore } from "../src/store/galatic-mysql-store.js";
 import { createGalaticPaymentRecovery } from "../src/services/galatic-payment-recovery.js";
 import { createApp } from "../src/application.js";
 import { tokenHash } from "../src/domain/password.js";
+import { createGalaticPaymentMaintenance } from "../src/services/galatic-payment-maintenance.js";
 
 const databaseUrl = process.env.MYSQL_TEST_URL;
 const logistics = { weight_grams: 1000, length_cm: 30, width_cm: 20, height_cm: 10 };
@@ -267,6 +268,59 @@ test("Galatic transactions against local disposable MySQL", { skip: !databaseUrl
     assert.equal(operation.state, "completed");
     const history = await store.adminRefundHistory(order.id);
     assert.equal(history.length, 2); assert.equal(history[0].state, "rejected"); assert.equal(history[1].state, "completed");
+  });
+
+  await t.test("refund operator reason survives reload and inconclusive maintenance while stale versions and completion remain protected", async () => {
+    const key = randomUUID(); const { order } = await prepare({ key });
+    await store.beginPaymentCreation(key, order.id, { customerId: "cus_synthetic", pricing: { baseCents: order.totalCents, totalCents: order.totalCents, installmentCents: order.totalCents, feeCents: 0 } });
+    await store.attachPayment(order.id, "pay_refund_operator", "paid", { totalCents: order.totalCents });
+    const old = await store.claimRefund(order.id, "synthetic-admin");
+    assert.equal(await store.recordRefundReconciliationError(order.id, "refund_authorization_required", old.version), false);
+    assert.equal((await store.adminRefundOperation(order.id)).error_code, null);
+    await store.finishRefundRequest(order.id, "rejected", "synthetic_rejection", old.version);
+    const claim = await store.claimRefund(order.id, "synthetic-admin");
+    assert.equal(await store.recordRefundReconciliationError(order.id, "stale_poll", old.version), false);
+    assert.equal((await store.adminRefundOperation(order.id)).error_code, null);
+    const finished = await store.finishRefundRequest(order.id, "requested", "refund_authorization_required", claim.version);
+    assert.equal(finished.updated, true);
+    const restarted = newStore();
+    const expected = { state: "requested", attempt_version: 2, error_code: "refund_authorization_required",
+      authorization_required: true, authorization_source: "refund_request_response" };
+    assert.deepEqual(await restarted.adminRefundOperation(order.id), expected);
+    assert.deepEqual((await restarted.adminOrder(order.id)).refund_operation, expected);
+    assert.equal((await restarted.claimRefund(order.id, "synthetic-admin")).claimed, false);
+    const maintenance = createGalaticPaymentMaintenance({
+      environment: { galaticPaymentMaintenanceEnabled: true, galaticPixReservationMinutes: 60, galaticCardReservationMinutes: 4320 },
+      store: { ...restarted, claimPaymentReconciliations: async () => [], listExpiredPaymentReservations: async () => [],
+        claimRefundReconciliations: async () => (await restarted.claimRefundReconciliations()).filter((refund) => refund.id === order.id) },
+      asaasClient: { getPayment: async (id) => {
+        assert.equal(id, "pay_refund_operator");
+        return { id, status: "RECEIVED", refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION" }] };
+      } },
+    });
+    await db.query("UPDATE galatic_payment_actions SET created_at=DATE_SUB(UTC_TIMESTAMP(3),INTERVAL 3 MINUTE),reconcile_after=NULL WHERE order_id=? AND action='refund'", [order.id]);
+    await maintenance.run();
+    assert.deepEqual(await restarted.adminRefundOperation(order.id), expected);
+    assert.equal(await restarted.recordRefundReconciliationError(order.id, "synthetic_network_error", claim.version), false);
+    await restarted.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_refund_operator", status: "refunded" });
+    assert.equal(await restarted.recordRefundReconciliationError(order.id, "late_poll", claim.version), false);
+    const late = await restarted.finishRefundRequest(order.id, "requested", "refund_authorization_required", claim.version);
+    assert.equal(late.updated, false); assert.equal(late.operation.state, "completed");
+    assert.equal(late.operation.authorization_required, false); assert.equal(late.operation.error_code, null);
+  });
+
+  await t.test("webhook completion before the SDK result prevents requested notification and late history downgrade", async () => {
+    const key = randomUUID(); const { order } = await prepare({ key });
+    await store.beginPaymentCreation(key, order.id, { customerId: "cus_synthetic", pricing: { baseCents: order.totalCents, totalCents: order.totalCents, installmentCents: order.totalCents, feeCents: 0 } });
+    await store.attachPayment(order.id, "pay_refund_race", "paid", { totalCents: order.totalCents });
+    const claim = await store.claimRefund(order.id, "synthetic-admin");
+    await replica.updateOrderFromWebhook({ provider: "asaas", providerOrderId: "pay_refund_race", status: "refunded" });
+    const result = await store.finishRefundRequest(order.id, "requested", "refund_authorization_required", claim.version);
+    assert.equal(result.updated, false); assert.equal(result.operation.state, "completed");
+    assert.equal(result.operation.error_code, null);
+    const [[jobs]] = await db.query("SELECT COUNT(*) total FROM galatic_notification_outbox WHERE order_id=? AND method='sendRefundRequested'", [order.id]);
+    assert.equal(jobs.total, 0);
+    assert.equal((await store.adminRefundHistory(order.id))[0].state, "completed");
   });
 
   async function accountHttp(context) {

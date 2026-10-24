@@ -4,6 +4,7 @@ import { createFixedWindowLimiter } from "../http/fixed-window-limiter.js";
 import { allowBodyFields } from "../http/request-security.js";
 import { ADMIN_SESSION_COOKIE, clearSessionCookie, sessionCredential, setSessionCookie } from "../http/session-cookie.js";
 import { normalizeAsaasPaymentStatus } from "../domain/payment-status.js";
+import { refundRequestReason } from "../domain/galatic-refund-operation.js";
 
 const clean = (value, maximum = 255) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maximum);
 const integer = (value, minimum = 0) => {
@@ -281,20 +282,36 @@ export function createGalaticAdminRouter(express, { environment, store, notifica
     let claim;
     try { claim = await store.claimRefund(order.id, request.galaticAdmin.id); }
     catch (error) { return response.status(409).json({ error: error?.code ?? "refund_unavailable" }); }
-    if (!claim.claimed) return response.status(202).json({ requested: claim.state === "requested" || claim.state === "completed",
-      reconciliation_pending: ["in_progress", "uncertain"].includes(claim.state), state: claim.state, order_id: order.id });
+    const reply = (operation, status = 202) => response.status(status).json({
+      requested: operation?.state === "requested", completed: operation?.state === "completed",
+      reconciliation_pending: ["in_progress", "uncertain"].includes(operation?.state),
+      state: operation?.state ?? "unknown", order_id: order.id, refund_operation: operation,
+      ...(operation?.state === "rejected" ? { error: "refund_rejected", message: "O provedor recusou o estorno." }
+        : operation?.state === "uncertain" ? { error: "refund_reconciliation_pending", message: "Estamos confirmando o estorno. Nao repita a operacao." }
+          : operation?.state === "requested" ? { message: operation.authorization_required
+            ? "Na resposta à solicitação, o Asaas indicou um estorno pendente de autorização no pagamento ou parcelamento relacionado. Verifique os detalhes no painel Asaas."
+            : "Estorno solicitado. A confirmacao sera conciliada pelo webhook do Asaas." } : {}),
+    });
+    if (!claim.claimed) return reply(await store.adminRefundOperation(order.id));
     try {
-      if (claim.group) await asaasClient.refundInstallment(claim.providerReference);
-      else await asaasClient.refundPayment(claim.providerReference);
-      await store.finishRefundRequest(order.id, "requested", null, claim.version);
-      await store.recordOperationalAlert?.({ type: "refund_requested", severity: "info", source: "galatic-admin",
-        summary: "Estorno integral solicitado ao Asaas.", context: { orderId: order.id, adminId: request.galaticAdmin.id, group: claim.group } });
-      return response.status(202).json({ requested: true, order_id: order.id, message: "Estorno solicitado. A confirmacao sera conciliada pelo webhook do Asaas." });
+      const provider = claim.group ? await asaasClient.refundInstallment(claim.providerReference)
+        : await asaasClient.refundPayment(claim.providerReference);
+      const reason = refundRequestReason(provider, claim.providerReference);
+      const finished = await store.finishRefundRequest(order.id, "requested", reason, claim.version);
+      const operation = await store.adminRefundOperation(order.id);
+      if (finished?.updated && operation?.state === "requested" && operation.attempt_version === claim.version) {
+        await store.recordOperationalAlert?.({ type: operation.authorization_required ? "refund_authorization_required" : "refund_requested",
+          severity: operation.authorization_required ? "warning" : "info", source: "galatic-admin",
+          summary: operation.authorization_required ? "Na resposta à solicitação, o Asaas indicou um estorno pendente de autorização no pagamento ou parcelamento relacionado. Verifique os detalhes no painel Asaas."
+            : "Estorno integral solicitado ao Asaas.",
+          context: { orderId: order.id, adminId: request.galaticAdmin.id, group: claim.group } });
+      }
+      return reply(operation);
     } catch (error) {
       const definitive = [400, 422].includes(error?.status);
       await store.finishRefundRequest(order.id, definitive ? "rejected" : "uncertain", error?.code ?? error?.name, claim.version).catch(() => {});
-      return response.status(definitive ? 400 : 202).json({ error: definitive ? "refund_rejected" : "refund_reconciliation_pending",
-        order_id: order.id, message: definitive ? "O provedor recusou o estorno." : "Estamos confirmando o estorno. Nao repita a operacao." });
+      const operation = await store.adminRefundOperation(order.id);
+      return reply(operation, operation?.state === "rejected" ? 400 : 202);
     }
   });
 

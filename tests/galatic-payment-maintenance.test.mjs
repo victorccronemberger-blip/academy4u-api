@@ -52,3 +52,21 @@ test("removes the full Asaas installment group for an abandoned card order", asy
   assert.equal((await maintenance.run()).canceled, 1);
   assert.equal(removed, "ins-card");
 });
+
+test("inconclusive refund polling passes its attempt version without treating refund array entries as current authorization or completion", async () => {
+  const errors = []; const updates = []; let failRead = false;
+  const store = {
+    listExpiredPaymentReservations: async () => [],
+    claimRefundReconciliations: async () => [{ id: "order-refund", providerOrderId: "pay_owned", installments: 1, version: 7 }],
+    recordRefundReconciliationError: async (...args) => { errors.push(args); },
+    updateOrderFromWebhook: async (value) => { updates.push(value); },
+  };
+  const asaasClient = { getPayment: async () => {
+    if (failRead) throw Object.assign(new Error("synthetic"), { code: "read_unavailable" });
+    return { id: "pay_owned", status: "RECEIVED", refunds: [{ status: "AWAITING_CRITICAL_ACTION_AUTHORIZATION" }, { status: "DONE" }] };
+  }, refundPayment: async () => assert.fail("maintenance must not mutate a refund") };
+  const maintenance = createGalaticPaymentMaintenance({ environment: environment(), store, asaasClient });
+  await maintenance.run(); failRead = true; await maintenance.run();
+  assert.deepEqual(errors, [["order-refund", "refund_not_yet_confirmed", 7], ["order-refund", "read_unavailable", 7]]);
+  assert.deepEqual(updates, []);
+});
