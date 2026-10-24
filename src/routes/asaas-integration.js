@@ -70,6 +70,8 @@ export function createAsaasWebhookHandler({
           providerGroupId,
           installment,
           eventId,
+          externalReference,
+          paymentEvidence: { id: payment.id, customer: payment.customer, billingType: payment.billingType, value: payment.value, installment: payment.installment, externalReference },
         });
         accessGrantedNow = persisted?.accessGrantedNow === true;
       } else {
@@ -79,6 +81,8 @@ export function createAsaasWebhookHandler({
           providerGroupId: null,
           status: normalizeAsaasWebhookStatus(event, payment?.status),
           eventId,
+          externalReference,
+          paymentEvidence: { id: payment.id, customer: payment.customer, billingType: payment.billingType, value: payment.value, installment: payment.installment, externalReference },
         });
         accessGrantedNow = persisted?.status === "paid" && persisted?.previousStatus !== "paid";
       }

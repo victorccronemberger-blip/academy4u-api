@@ -8,6 +8,7 @@ function fakeGalaticStore() {
   return {
     ensureSchema: async () => {}, close: async () => {},
     prepareOrder: async () => ({ kind: "created", order: { id: "52c02ff3-b755-4df5-90ba-20ea8c8bd035", subtotalCents: 44999, shippingCents: 2500, totalCents: 47499, lines: [] } }),
+    beginPaymentCreation: async () => {},
     attachPayment: async () => {},
     completeCheckoutAttempt: async () => {},
     releaseFailedOrder: async () => assert.fail("order should not be released"),

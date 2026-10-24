@@ -79,7 +79,9 @@ test("renders every new Galatic lifecycle email with the official visual signatu
   ]);
   for (const delivery of deliveries) {
     assert.match(delivery.html, /galatic-wordmark-email-v2\.png/);
-    assert.match(delivery.html, /CNPJ 67\.956\.916\/0001-90/);
+    assert.match(delivery.html, /galatic\.com\.br/);
+    assert.match(delivery.html, /prepara/);
+    assert.doesNotMatch(delivery.html, /CNPJ 67\.956\.916\/0001-90/);
     assert.match(delivery.html, /comercial@galatic\.com\.br/);
     assert.doesNotMatch(delivery.html, /<div[^>]*>GALATIC<\/div>/);
   }

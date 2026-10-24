@@ -9,19 +9,20 @@
   },
   "scripts": {
     "build": "node scripts/validate-build.mjs",
-    "galatic:audit-production": "node scripts/audit-galatic-production.mjs --environment=production",
-    "galatic:audit-sandbox": "node scripts/audit-galatic-production.mjs --environment=sandbox",
+    "galatic:audit-production": "node scripts/check-galatic-readiness.mjs --environment=production",
+    "galatic:audit-sandbox": "node scripts/check-galatic-readiness.mjs --environment=sandbox",
     "security:secrets": "node scripts/security-audit.mjs",
     "security:dependencies": "npm audit --omit=dev --audit-level=moderate",
     "security:audit": "npm run security:secrets && npm run security:dependencies",
     "start": "node src/server.js",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "test:mysql": "node --test tests/galatic-mysql.integration.test.mjs"
   },
   "dependencies": {
     "cors": "2.8.6",
-    "express": "5.2.1",
+    "express": "5.3.0",
     "helmet": "8.3.0",
-    "mysql2": "^3.14.4",
-    "nodemailer": "^9.0.5"
+    "mysql2": "3.24.6",
+    "nodemailer": "10.2.1"
   }
 }
