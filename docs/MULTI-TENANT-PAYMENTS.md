@@ -29,7 +29,7 @@ resolvidos dentro do contexto de cada plataforma.
 ```
 
 `/v1/checkout/*` usa o router da primeira plataforma, com as mesmas proteções.
-Os aliases `/v1/public/*` e `/v1/art/*` existem somente com Academy como padrão.
+O alias `/v1/public/*` existe somente com Academy como padrão.
 
 ## Autenticação por plataforma
 

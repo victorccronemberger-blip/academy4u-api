@@ -1,24 +1,5 @@
 [
   {
-    "slug": "10-anos-art-vitalicio",
-    "sourceTag": "10anos_anivertoro",
-    "title": "10 Anos ART (Vitalicio)",
-    "description": "Acesso vitalício à jornada comemorativa de formação para o mercado financeiro.",
-    "categoryId": "carreira",
-    "kind": "bundle",
-    "accent": "#800016",
-    "cohort": "4144",
-    "officialPriceCents": 1794600,
-    "priceCents": 897300,
-    "featured": true,
-    "keywords": [
-      "vitalício",
-      "formação",
-      "mercado financeiro"
-    ],
-    "active": false
-  },
-  {
     "slug": "agropulse",
     "sourceTag": "agropulse",
     "title": "Agropulse",
@@ -752,24 +733,6 @@
       "exame 54"
     ],
     "active": false
-  },
-  {
-    "slug": "mastermind-art",
-    "active": false,
-    "sourceTag": "mastermind-ART",
-    "title": "Mastermind ART",
-    "description": "Grupo de mastermind da Academia Rafael Toro.",
-    "categoryId": "carreira",
-    "kind": "course",
-    "accent": "#C00021",
-    "cohort": "4128",
-    "officialPriceCents": 480000,
-    "priceCents": 240000,
-    "featured": false,
-    "keywords": [
-      "mastermind",
-      "networking"
-    ]
   },
   {
     "slug": "onboarding-parceiros",

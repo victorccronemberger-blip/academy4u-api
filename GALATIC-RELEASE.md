@@ -73,9 +73,9 @@ financial selection/claims. Queued work remains intact. Invalid webhook
 authentication still returns 401; authenticated events receive retriable 503
 before any event receipt is stored. Local catalog/account/history reads and the
 notification mail outbox remain available. The default `/v1/checkout` alias uses
-the same Galatic router when Galatic is the default tenant. The generic Academy `/v1/public` and `/v1/art` aliases and ART worker are not
-mounted or initialized for a Galatic default tenant. Academy keeps its existing
-checkout, webhook, ART and LMS runtime behavior.
+the same Galatic router when Galatic is the default tenant. The generic Academy `/v1/public` alias is not
+mounted for a Galatic default tenant. Academy keeps its existing
+checkout, webhook and LMS runtime behavior.
 
 An owner session may read `GET /v1/galatic/admin/runtime`. It reports only
 `releaseRevision`, `sourceFingerprint`, `bootId`, `startedAt`,

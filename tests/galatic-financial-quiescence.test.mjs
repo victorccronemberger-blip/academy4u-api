@@ -207,9 +207,8 @@ test("sales closure retains store_not_open precedence during financial pause", a
   assert.equal(result.status, 503); assert.equal(result.body.error, "store_not_open");
 });
 
-test("Academy checkout, status, webhook and ART stay available alongside paused Galatic", async (t) => {
+test("Academy checkout, status and webhook stay available alongside paused Galatic", async (t) => {
   const academy = createInMemoryStore(); const galatic = createInMemoryStore(); let academyWebhook = 0;
-  academy.listArtMappings = async () => [{ course_id: 1 }];
   const providerCalls = [];
   const client = { findCustomersByDocument: async () => ({ data: [{ id: "cus_synthetic" }] }),
     createPayment: async (payload) => { providerCalls.push(payload.externalReference); return { ...payload, id: "pay_academy_synthetic", status: "PENDING" }; },
@@ -231,43 +230,29 @@ test("Academy checkout, status, webhook and ART stay available alongside paused 
   const event = { id: "evt_academy_synthetic", event: "PAYMENT_CONFIRMED", payment: { id: "pay_academy_synthetic", status: "CONFIRMED", externalReference: providerCalls[0] } };
   const hook = await read("/v1/webhooks/asaas", { method: "POST", headers: { "content-type": "application/json", "asaas-access-token": "synthetic-hook" }, body: JSON.stringify(event) });
   assert.equal(hook.status, 200); assert.equal(academyWebhook, 1);
-  assert.equal((await read("/v1/art/mappings", { headers: { "x-academy-trusted-token": "synthetic-trusted" } })).status, 200);
   assert.equal(runtime.contexts.get("galatic").financialGate.diagnostics().galaticFinancialOperationsInFlight, 0);
 });
 
-test("Galatic default cannot mount Academy public/ART aliases or start an Academy worker even when ART is configured", async (t) => {
-  let workerStarts = 0; let retries = 0; let activations = 0;
-  const runtime = createApp({ ...source, ART_ENABLED: "true", GALATIC_TRUSTED_CHECKOUT_TOKEN: "synthetic-trusted" }, {
-    stores: { galatic: createInMemoryStore() }, asaasClient: {}, artClient: { ready: true },
-    artRetryWorker: { start: () => { workerStarts += 1; }, processPending: async () => { retries += 1; return { processed: 1 }; } },
-    artActivation: { isEnabled: () => true, activateOrder: async () => { activations += 1; } },
+test("Galatic default cannot mount Academy public aliases", async (t) => {
+  const runtime = createApp({ ...source, GALATIC_TRUSTED_CHECKOUT_TOKEN: "synthetic-trusted" }, {
+    stores: { galatic: createInMemoryStore() }, asaasClient: {},
   });
   await runtime.ready; const read = await serve(t, runtime.app);
   const headers = { "content-type": "application/json", "x-academy-trusted-token": "synthetic-trusted" };
-  assert.equal((await read("/v1/art/retry", { method: "POST", headers, body: "{}" })).status, 404);
-  assert.equal((await read("/v1/art/mappings", { headers })).status, 404);
   assert.equal((await read("/v1/public/products")).status, 404);
   assert.equal((await read("/v1/public/quote", { method: "POST", headers, body: JSON.stringify({ slugs: ["novo-cpa"] }) })).status, 404);
-  assert.equal(workerStarts, 0); assert.equal(retries, 0); assert.equal(activations, 0);
-  assert.equal(runtime.contexts.get("galatic").artRetryWorker, undefined);
-  assert.equal(runtime.contexts.get("galatic").artActivation, undefined);
   assert.equal((await read("/v1/galatic/catalog/products")).status, 200);
   assert.equal((await read("/v1/checkout/status")).body.reason, "financial_operations_paused");
 });
 
-test("Academy default still starts its configured ART worker and serves legacy public/ART aliases", async (t) => {
-  let workerStarts = 0, retries = 0;
-  const store = createInMemoryStore(); store.listArtMappings = async () => [];
-  const runtime = createApp({ NODE_ENV: "test", ART_ENABLED: "true", TRUSTED_CHECKOUT_TOKEN: "synthetic-trusted" }, {
-    store, asaasClient: {}, artClient: { ready: true },
-    artRetryWorker: { start: () => { workerStarts += 1; }, processPending: async () => { retries += 1; return { processed: 1 }; } },
+test("Academy default still serves legacy public aliases", async (t) => {
+  const store = createInMemoryStore();
+  const runtime = createApp({ NODE_ENV: "test", TRUSTED_CHECKOUT_TOKEN: "synthetic-trusted" }, {
+    store, asaasClient: {},
   });
   await runtime.ready; const read = await serve(t, runtime.app);
   const headers = { "content-type": "application/json", "x-academy-trusted-token": "synthetic-trusted" };
-  assert.equal((await read("/v1/art/retry", { method: "POST", headers, body: "{}" })).status, 200);
-  assert.equal((await read("/v1/art/mappings", { headers })).status, 200);
   assert.equal((await read("/v1/public/products")).status, 200);
   const quote = await read("/v1/public/quote", { method: "POST", headers, body: JSON.stringify({ slugs: ["novo-cpa"] }) });
   assert.equal(quote.status, 200); assert.equal(quote.body.lines[0].slug, "novo-cpa");
-  assert.equal(workerStarts, 1); assert.equal(retries, 1);
 });
