@@ -138,25 +138,6 @@ export function getEnvironment(source = process.env) {
     checkoutEnabled: asaasRequested && asaasAvailable,
     galaticFinancialOperationsEnabled: source.GALATIC_FINANCIAL_OPERATIONS_ENABLED === "true",
     galaticSalesEnabled: source.GALATIC_SALES_ENABLED?.trim().toLowerCase() === "true" || (!source.GALATIC_SALES_ENABLED && source.NODE_ENV?.trim().toLowerCase() !== "production"),
-    // Integração ART (matrícula principal). ART_ENABLED=false desliga sem
-    // quebrar o fallback LMS. As demais variáveis têm defaults seguros.
-    artEnabled: parseBoolean(source.ART_ENABLED ?? "false"),
-    artApiOrigin: source.ART_API_ORIGIN?.trim() || "https://api.academiarafaeltoro.com.br",
-    artIdmOrigin: source.ART_IDM_ORIGIN?.trim() || "https://ms-idm.academiarafaeltoro.com.br",
-    artPublicKey: source.ART_PUBLIC_KEY || null,
-    artFakeIp: source.ART_FAKE_IP?.trim() || "203.0.113.50",
-    artRequestTimeoutMs: parsePositiveInteger(source.ART_REQUEST_TIMEOUT_MS, 8000, "ART_REQUEST_TIMEOUT_MS"),
-    artRetryIntervalMs: parsePositiveInteger(source.ART_RETRY_INTERVAL_MS, 300000, "ART_RETRY_INTERVAL_MS"),
-    artRetryMaxTries: parsePositiveInteger(source.ART_RETRY_MAX_TRIES, 8, "ART_RETRY_MAX_TRIES"),
-    // Piso (não teto) da varredura de orders ART: o topo é descoberto
-    // dinamicamente a partir daqui. Só precisa subir se um dia o topo já
-    // estiver muito acima (performance da primeira sonda do processo).
-    artScanFloor: parsePositiveInteger(source.ART_SCAN_FLOOR, 3180000, "ART_SCAN_FLOOR"),
-    // Delays do fluxo de ativação (ms) — defaults são os valores validados.
-    artProvisionPollMs: parsePositiveInteger(source.ART_PROVISION_POLL_MS, 4000, "ART_PROVISION_POLL_MS"),
-    artPhase2WaitMs: parsePositiveInteger(source.ART_PHASE2_WAIT_MS, 5000, "ART_PHASE2_WAIT_MS"),
-    artLoginPollMs: parsePositiveInteger(source.ART_LOGIN_POLL_MS, 3000, "ART_LOGIN_POLL_MS"),
-    artVerifyWaitMs: parsePositiveInteger(source.ART_VERIFY_WAIT_MS, 25000, "ART_VERIFY_WAIT_MS"),
   };
 }
 

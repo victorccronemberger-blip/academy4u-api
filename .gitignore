@@ -11,6 +11,5 @@ resultado-*.json
 bateria-*.json
 inbox_log.json
 .seen_uids.json
-# contexto sensível do engajamento ART (contém credenciais — nunca commitar)
-# Ancorado na raiz (/ART/) para NÃO casar src/integrations/art/ (código do client).
+# pasta local legada com credenciais de integração descontinuada — nunca commitar
 /ART/

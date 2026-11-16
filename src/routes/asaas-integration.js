@@ -111,12 +111,10 @@ export function createAsaasWebhookHandler({
         }
       }
       if (accessGrantedNow && persisted?.id && onAccessGranted) {
-        // A entrega (ativação ART + fallback LMS) pode levar MINUTOS (provision,
-        // scan de orders, verificação de propagação). O Asaas espera resposta
-        // rápida e o servidor tem requestTimeout de 75s: confirmamos o
-        // recebimento imediatamente e processamos em background. O dedupe por
-        // eventId/status + o lock por orderId em onAccessGranted impedem
-        // reprocessamento e execução concorrente do mesmo pedido.
+        // A entrega (matrícula no LMS) roda em background: o Asaas espera
+        // resposta rápida, então confirmamos o recebimento imediatamente. O
+        // dedupe por eventId/status + o lock da linha do pedido em
+        // grantOrderAccess impedem reprocessamento e entrega duplicada.
         const delivery = Promise.resolve()
           .then(() => onAccessGranted(persisted.id))
           .catch(async (error) => {
@@ -129,7 +127,7 @@ export function createAsaasWebhookHandler({
                 type: "access_grant_failed",
                 source: "asaas-webhook",
                 severity: "critical",
-                summary: "Falha no pipeline de entrega (ART/LMS) após webhook confirmado.",
+                summary: "Falha no pipeline de entrega (LMS) após webhook confirmado.",
                 context: { orderId: persisted.id, errorType: error?.name ?? "Error" },
               });
             } catch (alertError) {

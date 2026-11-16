@@ -1,6 +1,6 @@
 # Galatic payment profiles
 
-Stage B is a Galatic-only immutable provenance migration. Academy4u keeps its existing client, checkout aliases, LMS runtime token/hash configuration, installment/access callbacks and ART startup. Galatic never inherits the Academy Asaas key, origin, environment or webhook credential. The legacy webhook credential is used only to authenticate a retriable 503 on the old Galatic path.
+Stage B is a Galatic-only immutable provenance migration. Academy4u keeps its existing client, checkout aliases, LMS runtime token/hash configuration, and installment/access callbacks. Galatic never inherits the Academy Asaas key, origin, environment or webhook credential. The legacy webhook credential is used only to authenticate a retriable 503 on the old Galatic path.
 
 ## Configuration and authorization
 
